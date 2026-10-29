@@ -20,6 +20,8 @@ services:
         value: "https://sentiment-pulse-app.onrender.com"
       - key: APP_BASE_URL
         value: "https://sentiment-pulse-app.onrender.com"
+      - key: MAX_IMPORT_FILE_SIZE_BYTES
+        value: "104857600"
 
 databases:
   - name: sentiment-pulse-db

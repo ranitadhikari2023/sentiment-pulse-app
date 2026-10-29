@@ -42,7 +42,7 @@ Organizations receive thousands of unstructured customer reviews, support transc
 ### Data Management & History
 * **💾 Local IndexedDB Analysis History**: Private, client-side history stored locally in browser IndexedDB (`sentiment-pulse-db`). Supports live text search, sentiment filtering, sorting by date and confidence, record deletion, bulk clearing with confirmation modals, and zero-predict rehydration.
 * **🔎 Feedback Explorer**: Paginated server feedback table with search, sentiment filters, category tags, rating stars, source channels, and record detail inspection modals.
-* **📦 Bounded CSV Batch Ingestion & Secure Export**: Upload CSV reviews up to 5,000 rows with background chunking (`ImportJob`), progress tracking, encoding autodetection, and CSV formula injection sanitization (`=`, `+`, `-`, `@`) on export.
+* **📦 Bounded CSV Batch Ingestion & Secure Export**: Upload CSV reviews up to 100 MB (104,857,600 bytes) and up to 5,000 rows with bounded streaming chunking (`ImportJob`), progress tracking, encoding autodetection (UTF-8, UTF-8-BOM, Latin-1, CP1252), and CSV formula injection sanitization (`=`, `+`, `-`, `@`) on export.
 
 ### Analytics & Business Intelligence
 * **📊 Interactive Executive Analytics Dashboard**: Real-time visual metrics powered by dynamically loaded Chart.js:
@@ -297,7 +297,7 @@ The Sentiment Pulse web interface is built with responsive desktop and mobile vi
 ### Batch Import & Business Intelligence
 | Method | Endpoint | Description | Auth |
 | :--- | :--- | :--- | :---: |
-| `POST` | `/feedback/import` | Upload CSV feedback file (bounded chunk processing) | None |
+| `POST` | `/feedback/import` | Upload CSV feedback file up to 100 MB / 5,000 rows (bounded streaming chunk processing) | None |
 | `GET` | `/feedback/import/{id}`| Poll status and progress of import job | None |
 | `GET` | `/feedback/analytics` | Retrieve sentiment distributions, daily trends & churn alerts | None |
 

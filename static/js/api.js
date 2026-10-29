@@ -196,6 +196,7 @@ const API = {
     return this.request('/feedback/import', {
       method: 'POST',
       body: formData,
+      timeoutMs: 300000, // 5-minute timeout for large batch CSV uploads (up to 100 MB)
     });
   },
 

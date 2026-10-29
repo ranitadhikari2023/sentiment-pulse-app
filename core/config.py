@@ -61,7 +61,9 @@ class Settings:
 
     # Batch & CSV Import Limits
     MAX_BATCH_SIZE: int = int(os.getenv("MAX_BATCH_SIZE", "50"))
-    MAX_IMPORT_FILE_SIZE_BYTES: int = int(os.getenv("MAX_IMPORT_FILE_SIZE_BYTES", str(5 * 1024 * 1024)))  # 5 MB
+    MAX_IMPORT_FILE_SIZE_BYTES: int = int(
+        os.getenv("MAX_IMPORT_FILE_SIZE_BYTES", str(100 * 1024 * 1024))
+    )  # 100 MB (104,857,600 bytes)
     MAX_IMPORT_ROWS: int = int(os.getenv("MAX_IMPORT_ROWS", "5000"))
     IMPORT_CHUNK_SIZE: int = int(os.getenv("IMPORT_CHUNK_SIZE", "100"))
 
