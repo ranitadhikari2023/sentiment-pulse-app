@@ -10,7 +10,7 @@
  * - Versioned cache cleanup during activation
  */
 
-const CACHE_VERSION = 'v4';
+const CACHE_VERSION = 'v5';
 const CACHE_NAME = `sentiment-pulse-shell-${CACHE_VERSION}`;
 
 const SHELL_ASSETS = [

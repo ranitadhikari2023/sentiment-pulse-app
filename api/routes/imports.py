@@ -62,7 +62,7 @@ async def _upload_handler(file: UploadFile, db: Session, background_tasks: Backg
         if file.size is not None and file.size > settings.MAX_IMPORT_FILE_SIZE_BYTES:
             raise HTTPException(
                 status_code=getattr(status, "HTTP_413_CONTENT_TOO_LARGE", 413),
-                detail=f"Uploaded file exceeds maximum allowed size ({settings.MAX_IMPORT_FILE_SIZE_BYTES // (1024 * 1024)} MB)."
+                detail=f"Uploaded file exceeds maximum allowed size ({settings.MAX_IMPORT_FILE_SIZE_BYTES // (1024 * 1024)} MB). File exceeds the maximum permitted size of 100 MB."
             )
 
         # Read content in bounded streaming chunks (64 KB) into temporary file on disk
@@ -79,7 +79,7 @@ async def _upload_handler(file: UploadFile, db: Session, background_tasks: Backg
             if total_bytes > settings.MAX_IMPORT_FILE_SIZE_BYTES:
                 raise HTTPException(
                     status_code=getattr(status, "HTTP_413_CONTENT_TOO_LARGE", 413),
-                    detail=f"Uploaded file exceeds maximum allowed size ({settings.MAX_IMPORT_FILE_SIZE_BYTES // (1024 * 1024)} MB)."
+                    detail=f"Uploaded file exceeds maximum allowed size ({settings.MAX_IMPORT_FILE_SIZE_BYTES // (1024 * 1024)} MB). File exceeds the maximum permitted size of 100 MB."
                 )
             temp_file.write(chunk)
 
@@ -97,6 +97,9 @@ async def _upload_handler(file: UploadFile, db: Session, background_tasks: Backg
         if header_error:
             job = ImportService.create_import_job(db, file.filename)
             job.status = "FAILED"
+            job.total_rows = 0
+            job.successful_rows = 0
+            job.failed_rows = 0
             job.error_summary = json.dumps([header_error])
             job.completed_at = datetime.now(timezone.utc)
             db.commit()

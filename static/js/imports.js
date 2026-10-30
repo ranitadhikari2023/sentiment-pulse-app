@@ -15,6 +15,10 @@ const ImportsController = {
   _consecutivePollErrors: 0,
   _statusPulseTween: null,
   _activeImportTween: null,
+  _activeJobId: null,
+  _isTerminal: false,
+  _pollSequence: 0,
+  _pollInFlight: false,
 
   formatFileSize(bytes) {
     if (bytes === 0) return '0 B';
@@ -34,6 +38,10 @@ const ImportsController = {
       this.pollingInterval = null;
     }
     this._consecutivePollErrors = 0;
+    this._isTerminal = false;
+    this._activeJobId = null;
+    this._pollInFlight = false;
+    this._lastProgressPct = 0;
 
     this.stopPollingPulse();
 
@@ -85,9 +93,14 @@ const ImportsController = {
     const uploadBtn = document.getElementById('import-submit-btn');
     const cancelBtn = document.getElementById('import-cancel-btn');
     const exportBtn = document.getElementById('import-export-btn');
+    const sampleTemplateBtn = document.getElementById('import-sample-template-btn');
 
     if (selectFileBtn && fileInput) {
       selectFileBtn.addEventListener('click', () => fileInput.click());
+    }
+
+    if (sampleTemplateBtn) {
+      sampleTemplateBtn.addEventListener('click', () => this.downloadSampleTemplate());
     }
 
     if (fileInput) {
@@ -212,6 +225,9 @@ const ImportsController = {
   clearSelection() {
     this.selectedFile = null;
     this.isUploading = false;
+    this._isTerminal = false;
+    this._activeJobId = null;
+    this._pollInFlight = false;
     const fileInput = document.getElementById('import-file-input');
     const fileMeta = document.getElementById('import-file-meta');
     const promptZone = document.getElementById('import-prompt-zone');
@@ -233,6 +249,10 @@ const ImportsController = {
     }
 
     this.isUploading = true;
+    this._isTerminal = false;
+    this._activeJobId = null;
+    this._pollInFlight = false;
+    this._pollSequence = 0;
 
     const uploadBtn = document.getElementById('import-submit-btn');
     const statusCard = document.getElementById('import-status-card');
@@ -252,10 +272,15 @@ const ImportsController = {
 
     if (statusCard) statusCard.classList.remove('hidden');
     if (progressText) progressText.textContent = 'Uploading CSV file to server...';
-    if (progressBar) progressBar.style.width = '20%';
+    if (progressBar) {
+      progressBar.style.width = '20%';
+      progressBar.classList.remove('bg-rose-500', 'animate-pulse');
+      progressBar.classList.add('bg-indigo-600');
+    }
     if (progressPct) {
       progressPct.textContent = '20%';
-      progressPct.classList.remove('hidden');
+      progressPct.classList.remove('hidden', 'text-rose-500');
+      progressPct.classList.add('text-slate-500');
     }
     if (resultSummary) resultSummary.classList.add('hidden');
 
@@ -264,6 +289,7 @@ const ImportsController = {
     try {
       const job = await window.api.uploadCSV(this.selectedFile);
       this.clearSelection();
+      this._activeJobId = job.id;
 
       if (job.status === 'COMPLETED') {
         this.renderJobSuccess(job);
@@ -272,7 +298,7 @@ const ImportsController = {
       } else {
         // PENDING or PROCESSING: transition UI to accepted state and poll until terminal state
         if (progressText) {
-          progressText.textContent = 'Upload accepted. Ingestion queued in background...';
+          progressText.textContent = 'Upload accepted. Validating and analyzing batch...';
         }
         if (progressBar) progressBar.style.width = '25%';
         if (progressPct) progressPct.textContent = '25%';
@@ -282,6 +308,7 @@ const ImportsController = {
     } catch (err) {
       console.error('Import upload error:', err);
       this.isUploading = false;
+      this._isTerminal = true;
       this.stopPollingPulse();
 
       const errorMessage =
@@ -290,7 +317,10 @@ const ImportsController = {
           : err.message || 'CSV upload failed.';
 
       if (progressText) progressText.textContent = `Upload error: ${errorMessage}`;
-      if (progressBar) progressBar.style.width = '0%';
+      if (progressBar) {
+        progressBar.style.width = '0%';
+        progressBar.classList.remove('animate-pulse');
+      }
       if (progressPct) progressPct.textContent = '0%';
 
       if (statusCard && window.AnimationManager && !window.AnimationManager.isReducedMotion()) {
@@ -310,23 +340,72 @@ const ImportsController = {
 
     if (this.pollingInterval) {
       clearInterval(this.pollingInterval);
+      this.pollingInterval = null;
     }
     this._consecutivePollErrors = 0;
+    this._activeJobId = jobId;
+    this._isTerminal = false;
+    this._pollInFlight = false;
 
     this.pollingInterval = setInterval(async () => {
+      // 1. Guard against stale polling when job has reached terminal state or switched jobs
+      if (this._isTerminal || this._activeJobId !== jobId) {
+        if (this.pollingInterval) {
+          clearInterval(this.pollingInterval);
+          this.pollingInterval = null;
+        }
+        return;
+      }
+
+      // 2. Prevent overlapping async fetch calls
+      if (this._pollInFlight) {
+        return;
+      }
+
+      this._pollInFlight = true;
+      const seq = ++this._pollSequence;
+
       try {
         const job = await window.api.getImportJob(jobId);
+        this._pollInFlight = false;
         this._consecutivePollErrors = 0;
 
+        // 3. Drop response if terminal state was reached or new job began while in-flight
+        if (this._isTerminal || this._activeJobId !== jobId || seq < this._pollSequence) {
+          return;
+        }
+
+        // 4. Authoritative check: handle terminal states immediately before any progress rendering
+        if (job.status === 'COMPLETED' || job.status === 'FAILED') {
+          this._isTerminal = true;
+          if (this.pollingInterval) {
+            clearInterval(this.pollingInterval);
+            this.pollingInterval = null;
+          }
+          this.stopPollingPulse();
+
+          if (job.status === 'COMPLETED') {
+            this.renderJobSuccess(job);
+          } else {
+            this.renderJobFailure(job);
+          }
+          return;
+        }
+
+        // 5. Non-terminal states: PENDING
         if (job.status === 'PENDING') {
           if (progressText) {
             progressText.textContent = 'Import queued in background. Waiting for worker...';
           }
-          if (progressBar) progressBar.style.width = '25%';
+          if (progressBar) {
+            progressBar.style.width = '25%';
+            progressBar.classList.remove('animate-pulse');
+          }
           if (progressPct) progressPct.textContent = '25%';
           return;
         }
 
+        // 6. Non-terminal states: PROCESSING
         const processed = job.processed_rows || 0;
         const total = job.total_rows || 0;
 
@@ -344,7 +423,7 @@ const ImportsController = {
             progressText.textContent = `Processing records (${processed.toLocaleString()} / ${total.toLocaleString()})...`;
           }
         } else {
-          // Honest atomic processing state: records are flushed without partial intermediate commits
+          // Bounded atomic processing state: records are flushed without partial intermediate commits
           const displayPct = Math.max(50, this._lastProgressPct);
           this._lastProgressPct = displayPct;
 
@@ -360,18 +439,12 @@ const ImportsController = {
                 : 'Validating and analyzing batch in background...';
           }
         }
-
-        if (job.status === 'COMPLETED' || job.status === 'FAILED') {
-          clearInterval(this.pollingInterval);
-          this.pollingInterval = null;
-
-          if (job.status === 'COMPLETED') {
-            this.renderJobSuccess(job);
-          } else {
-            this.renderJobFailure(job);
-          }
-        }
       } catch (err) {
+        this._pollInFlight = false;
+        if (this._isTerminal || this._activeJobId !== jobId) {
+          return;
+        }
+
         this._consecutivePollErrors += 1;
         const MAX_CONSECUTIVE_POLL_ERRORS = 5;
 
@@ -380,8 +453,11 @@ const ImportsController = {
             progressText.textContent = `Temporary network interruption. Retrying status check (${this._consecutivePollErrors}/${MAX_CONSECUTIVE_POLL_ERRORS})...`;
           }
         } else {
-          clearInterval(this.pollingInterval);
-          this.pollingInterval = null;
+          this._isTerminal = true;
+          if (this.pollingInterval) {
+            clearInterval(this.pollingInterval);
+            this.pollingInterval = null;
+          }
           this.stopPollingPulse();
           this.isUploading = false;
           if (uploadBtn) uploadBtn.disabled = false;
@@ -394,13 +470,42 @@ const ImportsController = {
     }, 1500);
   },
 
+  downloadSampleTemplate() {
+    const csvContent =
+      'text,category,source,rating\n' +
+      '"The sentiment analysis platform is remarkably fast and intuitive.",UX,Web,5\n' +
+      '"Encountered intermittent timeout during checkout payment processing.",Billing,Mobile App,2\n' +
+      '"Customer service representative resolved my support ticket promptly.",Support,Email,4\n';
+
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'sample_feedback_template.csv';
+    document.body.appendChild(a);
+    a.click();
+    window.URL.revokeObjectURL(url);
+    document.body.removeChild(a);
+    if (typeof window.showToast === 'function') {
+      window.showToast('Sample CSV template downloaded!', 'success');
+    }
+  },
+
   async renderJobSuccess(job) {
+    this._isTerminal = true;
+    if (this.pollingInterval) {
+      clearInterval(this.pollingInterval);
+      this.pollingInterval = null;
+    }
     this.stopPollingPulse();
+    this.isUploading = false;
+    this._lastProgressPct = 0;
 
     const progressText = document.getElementById('import-progress-status');
     const progressBar = document.getElementById('import-progress-bar');
     const progressPct = document.getElementById('import-progress-pct');
     const resultSummary = document.getElementById('import-result-summary');
+    const summaryHeading = document.getElementById('import-summary-heading');
     const successIcon = document.getElementById('import-success-icon');
     const totalCount = document.getElementById('import-stat-total');
     const successCount = document.getElementById('import-stat-success');
@@ -410,10 +515,16 @@ const ImportsController = {
 
     if (progressBar) {
       progressBar.style.width = '100%';
-      progressBar.classList.remove('animate-pulse');
+      progressBar.classList.remove('animate-pulse', 'bg-rose-500');
+      progressBar.classList.add('bg-indigo-600');
     }
-    if (progressPct) progressPct.textContent = '100%';
+    if (progressPct) {
+      progressPct.textContent = '100%';
+      progressPct.classList.remove('text-rose-500');
+      progressPct.classList.add('text-slate-500');
+    }
     if (progressText) progressText.textContent = 'Import Job Completed Successfully!';
+    if (summaryHeading) summaryHeading.textContent = 'Batch Ingestion Results';
     if (totalCount) totalCount.textContent = job.total_rows;
     if (successCount) successCount.textContent = job.successful_rows;
     if (failCount) failCount.textContent = job.failed_rows;
@@ -458,25 +569,70 @@ const ImportsController = {
   },
 
   renderJobFailure(job) {
+    this._isTerminal = true;
+    if (this.pollingInterval) {
+      clearInterval(this.pollingInterval);
+      this.pollingInterval = null;
+    }
     this.stopPollingPulse();
     this.isUploading = false;
+    this._lastProgressPct = 0;
 
     const progressText = document.getElementById('import-progress-status');
     const progressBar = document.getElementById('import-progress-bar');
+    const progressPct = document.getElementById('import-progress-pct');
     const resultSummary = document.getElementById('import-result-summary');
+    const summaryHeading = document.getElementById('import-summary-heading');
     const errorBox = document.getElementById('import-error-box');
     const statusCard = document.getElementById('import-status-card');
     const uploadBtn = document.getElementById('import-submit-btn');
+    const totalCount = document.getElementById('import-stat-total');
+    const successCount = document.getElementById('import-stat-success');
+    const failCount = document.getElementById('import-stat-failed');
 
-    if (progressBar) progressBar.classList.remove('animate-pulse');
-    if (progressText) progressText.textContent = 'Import Job Failed.';
+    if (progressBar) {
+      progressBar.classList.remove('animate-pulse');
+      progressBar.style.width = '100%';
+      progressBar.classList.remove('bg-indigo-600');
+      progressBar.classList.add('bg-rose-500');
+    }
+    if (progressPct) {
+      progressPct.textContent = 'Failed';
+      progressPct.classList.remove('hidden', 'text-slate-500');
+      progressPct.classList.add('text-rose-500');
+    }
+    if (progressText) {
+      progressText.textContent = 'Import Job Failed.';
+    }
+
+    const totalRows = job.total_rows !== undefined && job.total_rows !== null ? job.total_rows : 0;
+    const successfulRows =
+      job.successful_rows !== undefined && job.successful_rows !== null ? job.successful_rows : 0;
+    const failedRows =
+      job.failed_rows !== undefined && job.failed_rows !== null ? job.failed_rows : 0;
+
+    if (totalCount) totalCount.textContent = totalRows;
+    if (successCount) successCount.textContent = successfulRows;
+    if (failCount) failCount.textContent = failedRows;
+
+    let errors = ['The server was unable to parse or process the CSV file.'];
+    if (job.error_summary) {
+      try {
+        const parsed = JSON.parse(job.error_summary);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          errors = parsed;
+        }
+      } catch {}
+    }
+
+    if (summaryHeading) {
+      summaryHeading.textContent =
+        successfulRows === 0
+          ? 'File Validation Failed (Rejected Before Ingestion)'
+          : 'Batch Ingestion Failed';
+    }
+
     if (errorBox) {
-      let errors = ['The server was unable to parse or process the CSV file.'];
-      if (job.error_summary) {
-        try {
-          errors = JSON.parse(job.error_summary);
-        } catch {}
-      }
       errorBox.innerHTML = errors.map((e) => `<li>${window.escapeHtml(e)}</li>`).join('');
       errorBox.classList.remove('hidden');
     }
@@ -492,7 +648,8 @@ const ImportsController = {
     }
 
     if (uploadBtn) uploadBtn.disabled = false;
-    window.showToast('Import job failed. Please inspect error log.', 'error');
+    const primaryError = errors[0] || 'Import job failed.';
+    window.showToast(primaryError, 'error');
   },
 };
 

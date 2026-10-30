@@ -443,6 +443,10 @@ class ImportService:
             # Attempt decoding with fallback strategies
             encoding = cls._detect_file_encoding(file_path)
             if encoding is None:
+                job.total_rows = 0
+                job.processed_rows = 0
+                job.successful_rows = 0
+                job.failed_rows = 0
                 job.status = "FAILED"
                 job.error_summary = json.dumps(["CSV encoding is not supported. Please use UTF-8, UTF-8 BOM, or Latin-1."])
                 job.completed_at = datetime.now(timezone.utc)
@@ -460,6 +464,10 @@ class ImportService:
                         break
 
                 if header_row is None:
+                    job.total_rows = 0
+                    job.processed_rows = 0
+                    job.successful_rows = 0
+                    job.failed_rows = 0
                     job.status = "FAILED"
                     job.error_summary = json.dumps(["CSV file is completely empty."])
                     job.completed_at = datetime.now(timezone.utc)
@@ -469,6 +477,10 @@ class ImportService:
                 text_col_idx, category_idx, source_idx, rating_idx, _ = cls.map_header_row(header_row)
 
                 if text_col_idx is None:
+                    job.total_rows = 0
+                    job.processed_rows = 0
+                    job.successful_rows = 0
+                    job.failed_rows = 0
                     job.status = "FAILED"
                     job.error_summary = json.dumps(["CSV header must contain a 'text', 'review', or 'feedback' column."])
                     job.completed_at = datetime.now(timezone.utc)
@@ -482,6 +494,10 @@ class ImportService:
                         total_data_rows += 1
 
                 if total_data_rows > settings.MAX_IMPORT_ROWS:
+                    job.total_rows = total_data_rows
+                    job.processed_rows = 0
+                    job.successful_rows = 0
+                    job.failed_rows = 0
                     job.status = "FAILED"
                     job.error_summary = json.dumps([
                         f"CSV exceeds maximum allowed rows ({total_data_rows} > {settings.MAX_IMPORT_ROWS}). Maximum batch limit is {settings.MAX_IMPORT_ROWS:,} records."
@@ -491,6 +507,10 @@ class ImportService:
                     return job
 
                 if total_data_rows == 0:
+                    job.total_rows = 0
+                    job.processed_rows = 0
+                    job.successful_rows = 0
+                    job.failed_rows = 0
                     job.status = "FAILED"
                     job.error_summary = json.dumps(["CSV file contains no data rows."])
                     job.completed_at = datetime.now(timezone.utc)

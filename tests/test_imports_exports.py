@@ -1836,3 +1836,180 @@ class TestSentimentTextDatasetCompatibility:
         status = client.get(f"/feedback/import/{job['id']}").json()
         assert status["status"] == "COMPLETED"
         assert status["successful_rows"] == 1
+
+
+
+# ---------------------------------------------------------------------------
+# Advanced CSV Row Count Validation & Large Dataset Tests
+# ---------------------------------------------------------------------------
+
+class TestRowCountValidationAndLargeDatasets:
+    """Tests for exact row count boundaries, large datasets, and accurate statistics."""
+
+    def test_exact_5000_rows_accepted(self, client, monkeypatch):
+        """Verifies that exactly 5,000 data records (boundary maximum) are accepted."""
+        monkeypatch.setattr("services.import_service.sentiment_service.predict", _mock_predict)
+
+        # 5,000 data rows
+        header = "text,category,source,rating\n"
+        data_rows = "".join(f'"Feedback row {i}",Product,Web,5\n' for i in range(5000))
+        csv_bytes = (header + data_rows).encode("utf-8")
+
+        res = client.post(
+            "/feedback/import",
+            files={"file": ("exact_5000.csv", io.BytesIO(csv_bytes), "text/csv")},
+        )
+        assert res.status_code == 202
+        job_init = res.json()
+
+        status_res = client.get(f"/feedback/import/{job_init['id']}").json()
+        assert status_res["status"] == "COMPLETED"
+        assert status_res["total_rows"] == 5000
+        assert status_res["successful_rows"] == 5000
+        assert status_res["failed_rows"] == 0
+
+    def test_5001_rows_rejected_stores_accurate_total(self, client):
+        """
+        Verifies that 5,001 data rows (boundary + 1) are rejected,
+        and total_rows is accurately stored as 5001 in the ImportJob.
+        """
+        header = "text,category,source,rating\n"
+        data_rows = "".join(f'"Feedback row {i}",Product,Web,5\n' for i in range(5001))
+        csv_bytes = (header + data_rows).encode("utf-8")
+
+        res = client.post(
+            "/feedback/import",
+            files={"file": ("too_many_5001.csv", io.BytesIO(csv_bytes), "text/csv")},
+        )
+        assert res.status_code == 202
+        job_init = res.json()
+
+        status_res = client.get(f"/feedback/import/{job_init['id']}").json()
+        assert status_res["status"] == "FAILED"
+        assert status_res["total_rows"] == 5001, f"Expected total_rows=5001, got {status_res['total_rows']}"
+        assert status_res["successful_rows"] == 0
+        assert status_res["failed_rows"] == 0
+        errors = json.loads(status_res["error_summary"])
+        assert any("5001 > 5000" in e for e in errors)
+        assert any("Maximum batch limit is 5,000 records" in e for e in errors)
+
+    def test_large_dataset_1048575_rows_rejected_safely(self, client):
+        """
+        Verifies that a dataset with 1,048,575 rows (the production issue dataset)
+        is safely rejected before ingestion, total_rows is stored as 1,048,575,
+        and zero feedback records are persisted.
+        """
+        from db.session import SessionLocal
+        from db.models import Feedback
+
+        db = SessionLocal()
+        initial_feedback_count = db.query(Feedback).count()
+        db.close()
+
+        # Generate 1,048,575 lines in a generator stream (approx 9.5 MB)
+        class MillionRowCSVStream(io.RawIOBase):
+            def __init__(self, num_rows=1048575):
+                self.num_rows = num_rows
+                self.header = b"ItemID,Sentiment,SentimentText\n"
+                self.row_template = b"1,0,Feedback\n"
+                self.header_sent = False
+                self.rows_sent = 0
+                self.buffer = b""
+
+            def readable(self):
+                return True
+
+            def readinto(self, b):
+                if not self.header_sent:
+                    self.buffer += self.header
+                    self.header_sent = True
+
+                while len(self.buffer) < len(b) and self.rows_sent < self.num_rows:
+                    batch = min(10000, self.num_rows - self.rows_sent)
+                    self.buffer += self.row_template * batch
+                    self.rows_sent += batch
+
+                if not self.buffer:
+                    return 0
+
+                n = min(len(b), len(self.buffer))
+                b[:n] = self.buffer[:n]
+                self.buffer = self.buffer[n:]
+                return n
+
+        stream = MillionRowCSVStream(num_rows=1048575)
+        res = client.post(
+            "/feedback/import",
+            files={"file": ("million_rows.csv", stream, "text/csv")},
+        )
+        assert res.status_code == 202
+        job_init = res.json()
+
+        status_res = client.get(f"/feedback/import/{job_init['id']}").json()
+        assert status_res["status"] == "FAILED"
+        assert status_res["total_rows"] == 1048575, f"Expected total_rows=1048575, got {status_res['total_rows']}"
+        assert status_res["successful_rows"] == 0
+        assert status_res["failed_rows"] == 0
+        errors = json.loads(status_res["error_summary"])
+        assert any("1048575 > 5000" in e for e in errors)
+
+        # Confirm zero records were persisted in DB
+        db2 = SessionLocal()
+        assert db2.query(Feedback).count() == initial_feedback_count
+        db2.close()
+
+    def test_logical_row_counting_with_quoted_multiline_feedback(self, client, monkeypatch):
+        """
+        Verifies that quoted multiline feedback fields are counted as single logical records,
+        NOT multiple physical lines.
+        """
+        monkeypatch.setattr("services.import_service.sentiment_service.predict", _mock_predict)
+
+        # 3 logical rows, with row 1 containing 4 lines, row 2 containing 2 lines
+        csv_content = (
+            'text,category,source,rating\n'
+            '"Line 1\nLine 2\nLine 3\nLine 4",UX,Web,5\n'
+            '"Second record\nwith newline",Support,Email,4\n'
+            '"Third record normal",Product,Web,5\n'
+        )
+        res = client.post(
+            "/feedback/import",
+            files={"file": ("multiline_logical.csv", io.BytesIO(csv_content.encode("utf-8")), "text/csv")},
+        )
+        assert res.status_code == 202
+        job_init = res.json()
+
+        status_res = client.get(f"/feedback/import/{job_init['id']}").json()
+        assert status_res["status"] == "COMPLETED"
+        assert status_res["total_rows"] == 3
+        assert status_res["successful_rows"] == 3
+        assert status_res["failed_rows"] == 0
+
+    def test_empty_rows_and_trailing_newlines_excluded(self, client, monkeypatch):
+        """
+        Verifies that empty rows, whitespace rows, and trailing newlines
+        are excluded from total_rows and data processing.
+        """
+        monkeypatch.setattr("services.import_service.sentiment_service.predict", _mock_predict)
+
+        csv_content = (
+            "text,category,source,rating\n"
+            "\n"
+            "   \n"
+            "Valid review 1,Product,Web,5\n"
+            ",,,\n"
+            "Valid review 2,Support,Email,4\n"
+            "\n"
+            "\n"
+        )
+        res = client.post(
+            "/feedback/import",
+            files={"file": ("sparse_empty_rows.csv", io.BytesIO(csv_content.encode("utf-8")), "text/csv")},
+        )
+        assert res.status_code == 202
+        job_init = res.json()
+
+        status_res = client.get(f"/feedback/import/{job_init['id']}").json()
+        assert status_res["status"] == "COMPLETED"
+        assert status_res["total_rows"] == 2
+        assert status_res["successful_rows"] == 2

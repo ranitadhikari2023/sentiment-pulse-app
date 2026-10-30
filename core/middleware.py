@@ -38,7 +38,7 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
                         process_time = (time.perf_counter() - start_time) * 1000  # ms
                         return JSONResponse(
                             status_code=413,
-                            content={"detail": f"Uploaded file exceeds maximum allowed size ({max_mb} MB)."},
+                            content={"detail": f"Uploaded file exceeds maximum allowed size ({max_mb} MB). File exceeds the maximum permitted size of 100 MB."},
                             headers={
                                 "X-Request-ID": req_id,
                                 "X-Process-Time": f"{process_time:.2f}ms",

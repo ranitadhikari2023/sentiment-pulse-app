@@ -73,6 +73,8 @@ describe('Imports Controller & 100 MB Limit Subsystem', () => {
       'import-stat-success',
       'import-stat-failed',
       'import-error-box',
+      'import-summary-heading',
+      'import-sample-template-btn',
     ];
 
     elIds.forEach((id) => {
@@ -540,6 +542,211 @@ describe('Imports Controller & 100 MB Limit Subsystem', () => {
         ImportsController.pollingInterval,
         null,
         'Polling interval must be cancelled on cleanup'
+      );
+    });
+
+    it('accurately renders job failure state without stale progress (Phase 6 & 10)', () => {
+      const failedJob = {
+        id: 'job-fail-1',
+        status: 'FAILED',
+        total_rows: 0,
+        successful_rows: 0,
+        failed_rows: 0,
+        error_summary: JSON.stringify([
+          "CSV header must contain a 'text', 'review', or 'feedback' column.",
+        ]),
+      };
+
+      // Set initial state as if upload had started
+      elements['import-progress-bar'].style.width = '20%';
+      elements['import-progress-pct'].textContent = '20%';
+
+      ImportsController.renderJobFailure(failedJob);
+
+      assert.equal(
+        elements['import-progress-bar'].style.width,
+        '100%',
+        'Progress bar must transition to 100% on failure'
+      );
+      assert.ok(
+        elements['import-progress-bar'].classList.contains('bg-rose-500'),
+        'Progress bar must indicate failure color'
+      );
+      assert.equal(
+        elements['import-progress-pct'].textContent,
+        'Failed',
+        'Progress pct must state Failed rather than 20%'
+      );
+      assert.equal(
+        elements['import-progress-status'].textContent,
+        'Import Job Failed.',
+        'Status text must indicate failure'
+      );
+      assert.equal(
+        elements['import-summary-heading'].textContent,
+        'File Validation Failed (Rejected Before Ingestion)',
+        'Header validation failure must display clear validation failure heading'
+      );
+      assert.ok(
+        elements['import-error-box'].innerHTML.includes(
+          'CSV header must contain a &#39;text&#39;, &#39;review&#39;, or &#39;feedback&#39; column.'
+        ) ||
+          elements['import-error-box'].innerHTML.includes(
+            "CSV header must contain a 'text', 'review', or 'feedback' column."
+          ),
+        'Error box must render exact backend error message'
+      );
+      assert.ok(
+        toastMessages.some(
+          (t) =>
+            t.type === 'error' &&
+            t.msg === "CSV header must contain a 'text', 'review', or 'feedback' column."
+        ),
+        'Toast must display the specific backend error rather than generic text'
+      );
+      assert.equal(elements['import-submit-btn'].disabled, false, 'Submit button must re-enable');
+    });
+
+    it('downloads sample feedback template on demand', () => {
+      let createdBlob = null;
+      let clicked = false;
+      let revokedUrl = null;
+
+      globalThis.Blob = class {
+        constructor(parts, opts) {
+          this.parts = parts;
+          this.opts = opts;
+          createdBlob = this;
+        }
+      };
+
+      globalThis.window.URL = {
+        createObjectURL: () => 'blob:mock-url',
+        revokeObjectURL: (url) => {
+          revokedUrl = url;
+        },
+      };
+
+      const mockAnchor = {
+        href: '',
+        download: '',
+        click() {
+          clicked = true;
+        },
+      };
+
+      const originalCreateElement = globalThis.document.createElement;
+      globalThis.document.createElement = (tag) => {
+        if (tag === 'a') return mockAnchor;
+        return originalCreateElement ? originalCreateElement(tag) : {};
+      };
+      globalThis.document.body = {
+        appendChild: () => {},
+        removeChild: () => {},
+      };
+
+      ImportsController.downloadSampleTemplate();
+
+      assert.ok(createdBlob, 'Blob must be created');
+      assert.ok(createdBlob.parts[0].includes('text,category,source,rating'));
+      assert.equal(mockAnchor.download, 'sample_feedback_template.csv');
+      assert.equal(clicked, true, 'Anchor click must be triggered');
+      assert.equal(revokedUrl, 'blob:mock-url');
+      assert.ok(
+        toastMessages.some((t) => t.type === 'success' && t.msg.includes('template downloaded'))
+      );
+    });
+
+    it('displays accurate detected record count and 0 failed rows on pre-ingestion rejection', () => {
+      const oversizedJob = {
+        id: 'job-oversized-1',
+        status: 'FAILED',
+        total_rows: 1048575,
+        successful_rows: 0,
+        failed_rows: 0,
+        error_summary: JSON.stringify([
+          'CSV exceeds maximum allowed rows (1048575 > 5000). Maximum batch limit is 5,000 records.',
+        ]),
+      };
+
+      ImportsController.renderJobFailure(oversizedJob);
+
+      assert.equal(
+        elements['import-stat-total'].textContent,
+        1048575,
+        'Detected records must reflect actual parsed row count'
+      );
+      assert.equal(
+        elements['import-stat-success'].textContent,
+        0,
+        'Successfully imported must be 0'
+      );
+      assert.equal(
+        elements['import-stat-failed'].textContent,
+        0,
+        'Row-level failures must be 0 because rejection was before ingestion'
+      );
+      assert.equal(
+        elements['import-summary-heading'].textContent,
+        'File Validation Failed (Rejected Before Ingestion)',
+        'Must display pre-ingestion rejection heading'
+      );
+      assert.equal(elements['import-progress-pct'].textContent, 'Failed');
+      assert.equal(elements['import-progress-status'].textContent, 'Import Job Failed.');
+      assert.equal(elements['import-progress-bar'].style.width, '100%');
+      assert.ok(elements['import-progress-bar'].classList.contains('bg-rose-500'));
+    });
+
+    it('prevents stale or out-of-order polling responses from overwriting terminal FAILED state', async () => {
+      const failedJob = {
+        id: 'job-race-1',
+        status: 'FAILED',
+        total_rows: 1048575,
+        successful_rows: 0,
+        failed_rows: 0,
+        error_summary: JSON.stringify(['CSV exceeds maximum allowed rows (1048575 > 5000).']),
+      };
+
+      // 1. Job fails and transitions to terminal state
+      ImportsController.renderJobFailure(failedJob);
+      assert.equal(ImportsController._isTerminal, true);
+      assert.equal(elements['import-progress-pct'].textContent, 'Failed');
+      assert.equal(elements['import-progress-status'].textContent, 'Import Job Failed.');
+      assert.equal(elements['import-progress-bar'].style.width, '100%');
+
+      // 2. Simulate a delayed, stale polling tick returning PROCESSING
+      ImportsController._activeJobId = 'job-race-1';
+      // Attempting to poll or process stale update when _isTerminal is true must be rejected
+      const staleJob = {
+        id: 'job-race-1',
+        status: 'PROCESSING',
+        total_rows: 0,
+        processed_rows: 0,
+      };
+
+      window.api.getImportJob = async () => staleJob;
+      // Trigger a poll check directly
+      ImportsController.pollJob('job-race-1');
+
+      // 3. Verify terminal state remains intact: progress bar is not reverted to 50%
+      assert.equal(
+        elements['import-progress-pct'].textContent,
+        'Failed',
+        'Stale response must not revert Failed label'
+      );
+      assert.equal(
+        elements['import-progress-status'].textContent,
+        'Import Job Failed.',
+        'Stale response must not revert status text'
+      );
+      assert.equal(
+        elements['import-progress-bar'].style.width,
+        '100%',
+        'Stale response must not revert progress bar to 50%'
+      );
+      assert.ok(
+        elements['import-progress-bar'].classList.contains('bg-rose-500'),
+        'Bar must remain rose-500'
       );
     });
   });
