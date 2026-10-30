@@ -1413,3 +1413,426 @@ def test_cleanup_temp_file_helper_robustness():
     tf3.close()
     _cleanup_temp_file(mock_file, tf3_path)
     assert not os.path.exists(tf3_path)
+
+
+# ============================================================================
+# COMPREHENSIVE CSV INGESTION REGRESSION SUITE (PHASE 11)
+# ============================================================================
+
+
+def test_csv_header_aliases_and_case_insensitivity(client, monkeypatch):
+    """
+    Verifies all primary and extended header aliases with various casing:
+    - text, review, feedback
+    - TEXT, Review, FEEDBACK
+    - review_text, Review Text, feedback_text
+    - surrounding whitespace '  review  '
+    """
+    monkeypatch.setattr(
+        "services.import_service.sentiment_service.predict",
+        lambda text: {
+            "text": text[:50],
+            "sentiment": "positive",
+            "confidence": 0.95,
+            "scores": {"positive": 0.95, "neutral": 0.03, "negative": 0.02}
+        }
+    )
+
+    alias_headers = [
+        "text,category,rating\n\"Valid text column\",UX,5\n",
+        "review,category,rating\n\"Valid review column\",UX,5\n",
+        "feedback,category,rating\n\"Valid feedback column\",UX,5\n",
+        "TEXT,CATEGORY,RATING\n\"Valid uppercase TEXT\",UX,5\n",
+        "Review,Category,Rating\n\"Valid capitalized Review\",UX,5\n",
+        "  review  ,  category  ,  rating  \n\"Valid review with whitespace\",UX,5\n",
+        "review_text,category,rating\n\"Valid review_text alias\",UX,5\n",
+        "Review Text,Category,Rating\n\"Valid spaced Review Text alias\",UX,5\n",
+        "feedback_text,category,rating\n\"Valid feedback_text alias\",UX,5\n",
+    ]
+
+    for idx, csv_data in enumerate(alias_headers):
+        res = client.post(
+            "/feedback/import",
+            files={"file": (f"alias_test_{idx}.csv", io.BytesIO(csv_data.encode("utf-8")), "text/csv")}
+        )
+        assert res.status_code == 202, f"Failed for header: {csv_data.splitlines()[0]}"
+        job = res.json()
+        assert job["status"] in ("PENDING", "PROCESSING", "COMPLETED")
+
+        # Verify job completes successfully
+        poll = client.get(f"/feedback/import/{job['id']}").json()
+        assert poll["status"] == "COMPLETED", f"Job failed for header {csv_data.splitlines()[0]}: {poll.get('error_summary')}"
+        assert poll["successful_rows"] == 1
+
+
+def test_csv_delimiters_semicolon_tab_pipe(client, monkeypatch):
+    """
+    Verifies supported non-comma delimiters:
+    1. Semicolon ';' (European standard)
+    2. Tab '\\t' (TSV standard)
+    3. Pipe '|' (Pipe-delimited standard)
+    """
+    monkeypatch.setattr(
+        "services.import_service.sentiment_service.predict",
+        lambda text: {
+            "text": text[:50],
+            "sentiment": "neutral",
+            "confidence": 0.88,
+            "scores": {"positive": 0.05, "neutral": 0.88, "negative": 0.07}
+        }
+    )
+
+    # 1. Semicolon
+    semi_csv = "text;category;rating\n\"European semicolon separated review\";Support;4\n"
+    res_semi = client.post(
+        "/feedback/import",
+        files={"file": ("semicolon.csv", io.BytesIO(semi_csv.encode("utf-8")), "text/csv")}
+    )
+    assert res_semi.status_code == 202
+    job_semi = client.get(f"/feedback/import/{res_semi.json()['id']}").json()
+    assert job_semi["status"] == "COMPLETED"
+    assert job_semi["successful_rows"] == 1
+
+    # 2. Tab
+    tab_csv = "review\tcategory\trating\nTab separated customer review\tUX\t5\n"
+    res_tab = client.post(
+        "/feedback/import",
+        files={"file": ("tab.csv", io.BytesIO(tab_csv.encode("utf-8")), "text/csv")}
+    )
+    assert res_tab.status_code == 202
+    job_tab = client.get(f"/feedback/import/{res_tab.json()['id']}").json()
+    assert job_tab["status"] == "COMPLETED"
+    assert job_tab["successful_rows"] == 1
+
+    # 3. Pipe
+    pipe_csv = "feedback|category|rating\nPipe separated customer feedback|General|3\n"
+    res_pipe = client.post(
+        "/feedback/import",
+        files={"file": ("pipe.csv", io.BytesIO(pipe_csv.encode("utf-8")), "text/csv")}
+    )
+    assert res_pipe.status_code == 202
+    job_pipe = client.get(f"/feedback/import/{res_pipe.json()['id']}").json()
+    assert job_pipe["status"] == "COMPLETED"
+    assert job_pipe["successful_rows"] == 1
+
+
+def test_csv_quoted_commas_and_multiline_fields(client, monkeypatch):
+    """
+    Verifies RFC 4180 parsing for:
+    - Feedback containing commas inside quoted strings
+    - Feedback containing newline characters inside quoted strings
+    - Multiline rows correctly counted as 1 record rather than multiple physical lines
+    """
+    monkeypatch.setattr(
+        "services.import_service.sentiment_service.predict",
+        lambda text: {
+            "text": text[:50],
+            "sentiment": "positive",
+            "confidence": 0.99,
+            "scores": {"positive": 0.99, "neutral": 0.01, "negative": 0.00}
+        }
+    )
+
+    multiline_csv = (
+        'text,category,rating\n'
+        '"Great product, highly recommended, will buy again!",E-Commerce,5\n'
+        '"First paragraph of long review.\nSecond paragraph with detailed feedback.\nConclusion: 5 stars.",Support,5\n'
+    )
+    res = client.post(
+        "/feedback/import",
+        files={"file": ("multiline.csv", io.BytesIO(multiline_csv.encode("utf-8")), "text/csv")}
+    )
+    assert res.status_code == 202
+    job = client.get(f"/feedback/import/{res.json()['id']}").json()
+    assert job["status"] == "COMPLETED"
+    assert job["total_rows"] == 2
+    assert job["successful_rows"] == 2
+
+
+def test_csv_empty_rows_and_duplicate_headers(client, monkeypatch):
+    """
+    Verifies that:
+    1. Empty rows at start, middle, and end of CSV are cleanly ignored
+    2. Empty header cells are ignored
+    3. Duplicate headers take first occurrence without crashing
+    """
+    monkeypatch.setattr(
+        "services.import_service.sentiment_service.predict",
+        lambda text: {
+            "text": text[:50],
+            "sentiment": "neutral",
+            "confidence": 0.85,
+            "scores": {"positive": 0.1, "neutral": 0.85, "negative": 0.05}
+        }
+    )
+
+    messy_csv = (
+        "\n"
+        "text,,category,text,rating\n"
+        "\n"
+        '"First review",,UX,"duplicate text cell",5\n'
+        "   \n"
+        '"Second review",,Bug,"another dup",2\n'
+        "\n\n"
+    )
+    res = client.post(
+        "/feedback/import",
+        files={"file": ("messy.csv", io.BytesIO(messy_csv.encode("utf-8")), "text/csv")}
+    )
+    assert res.status_code == 202
+    job = client.get(f"/feedback/import/{res.json()['id']}").json()
+    assert job["status"] == "COMPLETED"
+    assert job["total_rows"] == 2
+    assert job["successful_rows"] == 2
+
+
+def test_unsupported_utf16_encoding_rejected(client):
+    """
+    Verifies that UTF-16 encoded CSV files are rejected with the documented
+    actionable encoding error message.
+    """
+    utf16_content = "text,category,rating\n\"UTF-16 test\",Test,5\n".encode("utf-16")
+    res = client.post(
+        "/feedback/import",
+        files={"file": ("utf16_file.csv", io.BytesIO(utf16_content), "text/csv")}
+    )
+    assert res.status_code == 202
+    job = res.json()
+    assert job["status"] == "FAILED"
+    assert "CSV encoding is not supported" in job["error_summary"]
+    assert "UTF-8" in job["error_summary"]
+
+
+def test_no_records_persisted_on_header_validation_failure(client):
+    """
+    Verifies that when a CSV fails header pre-validation, no Feedback records
+    are inserted or persisted in the database.
+    """
+    # Get current feedback count
+    init_res = client.get("/feedback")
+    init_count = init_res.json()["total"]
+
+    bad_csv = "user,score,timestamp\nalice,5,2026-01-01\n"
+    res = client.post(
+        "/feedback/import",
+        files={"file": ("missing_col.csv", io.BytesIO(bad_csv.encode("utf-8")), "text/csv")}
+    )
+    assert res.status_code == 202
+    job = res.json()
+    assert job["status"] == "FAILED"
+    assert job["total_rows"] == 0
+    assert job["successful_rows"] == 0
+
+    # Verify count did not increase
+    after_res = client.get("/feedback")
+    assert after_res.json()["total"] == init_count
+
+
+def test_file_between_5mb_and_100mb_accepted(client, monkeypatch):
+    """
+    Verifies that a CSV file larger than the old 5 MB limit (e.g. 10 MB)
+    is accepted and processed successfully under the 100 MB limit.
+    """
+    monkeypatch.setattr(
+        "services.import_service.sentiment_service.predict",
+        lambda text: {
+            "text": text[:50],
+            "sentiment": "positive",
+            "confidence": 0.98,
+            "scores": {"positive": 0.98, "neutral": 0.01, "negative": 0.01}
+        }
+    )
+
+    # 10 MB streaming CSV file
+    stream = FastCSVStream(10 * 1024 * 1024, num_rows=100)
+    res = client.post(
+        "/feedback/import",
+        files={"file": ("ten_mb.csv", stream, "text/csv")}
+    )
+    assert res.status_code == 202
+    job = res.json()
+    assert job["status"] in ("PENDING", "PROCESSING", "COMPLETED")
+
+    status_res = client.get(f"/feedback/import/{job['id']}").json()
+    assert status_res["status"] == "COMPLETED"
+    assert status_res["successful_rows"] == 100
+
+
+
+# ---------------------------------------------------------------------------
+# SentimentText dataset compatibility tests
+# ---------------------------------------------------------------------------
+
+def _mock_predict(text):
+    """Deterministic sentiment mock for SentimentText tests."""
+    return {
+        "text": text[:50],
+        "sentiment": "positive" if "great" in text.lower() or "excellent" in text.lower() or "enjoyed" in text.lower() else "negative",
+        "confidence": 0.95,
+        "scores": {"positive": 0.90, "neutral": 0.05, "negative": 0.05},
+    }
+
+
+class TestSentimentTextDatasetCompatibility:
+    """Tests for ItemID,Sentiment,SentimentText dataset support."""
+
+    def test_sentimenttext_header_recognized(self, client, monkeypatch):
+        """SentimentText (camelCase) is accepted as the text column."""
+        monkeypatch.setattr("services.import_service.sentiment_service.predict", _mock_predict)
+        csv_data = "SentimentText\nGreat product!\n"
+        res = client.post(
+            "/feedback/import",
+            files={"file": ("st.csv", io.BytesIO(csv_data.encode()), "text/csv")},
+        )
+        assert res.status_code == 202
+        job = res.json()
+        status = client.get(f"/feedback/import/{job['id']}").json()
+        assert status["status"] == "COMPLETED"
+        assert status["successful_rows"] == 1
+
+    def test_sentimenttext_lowercase(self, client, monkeypatch):
+        """sentimenttext (all lowercase) resolves to the text column."""
+        monkeypatch.setattr("services.import_service.sentiment_service.predict", _mock_predict)
+        csv_data = "sentimenttext\nGreat service.\n"
+        res = client.post(
+            "/feedback/import",
+            files={"file": ("st2.csv", io.BytesIO(csv_data.encode()), "text/csv")},
+        )
+        job = res.json()
+        status = client.get(f"/feedback/import/{job['id']}").json()
+        assert status["status"] == "COMPLETED"
+        assert status["successful_rows"] == 1
+
+    def test_sentimenttext_uppercase(self, client, monkeypatch):
+        """SENTIMENTTEXT (all caps) resolves to the text column."""
+        monkeypatch.setattr("services.import_service.sentiment_service.predict", _mock_predict)
+        csv_data = "SENTIMENTTEXT\nExcellent!\n"
+        res = client.post(
+            "/feedback/import",
+            files={"file": ("st3.csv", io.BytesIO(csv_data.encode()), "text/csv")},
+        )
+        job = res.json()
+        status = client.get(f"/feedback/import/{job['id']}").json()
+        assert status["status"] == "COMPLETED"
+        assert status["successful_rows"] == 1
+
+    def test_sentiment_text_with_underscore(self, client, monkeypatch):
+        """Sentiment_Text (underscore variant) resolves to the text column."""
+        monkeypatch.setattr("services.import_service.sentiment_service.predict", _mock_predict)
+        csv_data = "Sentiment_Text\nDecent experience.\n"
+        res = client.post(
+            "/feedback/import",
+            files={"file": ("st4.csv", io.BytesIO(csv_data.encode()), "text/csv")},
+        )
+        job = res.json()
+        status = client.get(f"/feedback/import/{job['id']}").json()
+        assert status["status"] == "COMPLETED"
+        assert status["successful_rows"] == 1
+
+    def test_sentiment_text_with_space(self, client, monkeypatch):
+        """'Sentiment Text' (space-separated) resolves via slug normalization."""
+        monkeypatch.setattr("services.import_service.sentiment_service.predict", _mock_predict)
+        csv_data = "Sentiment Text\nPretty good.\n"
+        res = client.post(
+            "/feedback/import",
+            files={"file": ("st5.csv", io.BytesIO(csv_data.encode()), "text/csv")},
+        )
+        job = res.json()
+        status = client.get(f"/feedback/import/{job['id']}").json()
+        assert status["status"] == "COMPLETED"
+        assert status["successful_rows"] == 1
+
+    def test_sentiment_column_alone_not_treated_as_text(self, client):
+        """A CSV with only 'Sentiment' (no text column) must fail header validation."""
+        csv_data = "Sentiment,ItemID\n0,1\n1,2\n"
+        res = client.post(
+            "/feedback/import",
+            files={"file": ("no_text.csv", io.BytesIO(csv_data.encode()), "text/csv")},
+        )
+        assert res.status_code == 202
+        job = res.json()
+        assert job["status"] == "FAILED"
+        assert "text" in job["error_summary"].lower() or "column" in job["error_summary"].lower()
+
+    def test_full_itemid_sentiment_sentimenttext_dataset(self, client, monkeypatch):
+        """
+        End-to-end integration test with the exact ItemID,Sentiment,SentimentText
+        dataset format. Verifies:
+        - SentimentText values are extracted as feedback text
+        - ItemID and Sentiment columns are safely ignored
+        - All 3 rows are imported successfully
+        """
+        monkeypatch.setattr("services.import_service.sentiment_service.predict", _mock_predict)
+        csv_data = (
+            'ItemID,Sentiment,SentimentText\n'
+            '1,0,"This product is disappointing."\n'
+            '2,1,"Excellent experience and great service."\n'
+            '3,1,"I really enjoyed using this application."\n'
+        )
+        res = client.post(
+            "/feedback/import",
+            files={"file": ("dataset.csv", io.BytesIO(csv_data.encode()), "text/csv")},
+        )
+        assert res.status_code == 202
+        job = res.json()
+        status = client.get(f"/feedback/import/{job['id']}").json()
+        assert status["status"] == "COMPLETED"
+        assert status["total_rows"] == 3
+        assert status["successful_rows"] == 3
+        assert status["failed_rows"] == 0
+
+    def test_duplicate_itemid_values_imported_independently(self, client, monkeypatch):
+        """Duplicate ItemID values do not cause conflicts (ItemID is ignored)."""
+        monkeypatch.setattr("services.import_service.sentiment_service.predict", _mock_predict)
+        csv_data = (
+            "ItemID,SentimentText\n"
+            "1,First feedback.\n"
+            "1,Second feedback with same ID.\n"
+        )
+        res = client.post(
+            "/feedback/import",
+            files={"file": ("dup_id.csv", io.BytesIO(csv_data.encode()), "text/csv")},
+        )
+        job = res.json()
+        status = client.get(f"/feedback/import/{job['id']}").json()
+        assert status["status"] == "COMPLETED"
+        assert status["successful_rows"] == 2
+
+    def test_existing_text_format_still_works(self, client, monkeypatch):
+        """Standard text,category,source,rating format continues to work."""
+        monkeypatch.setattr("services.import_service.sentiment_service.predict", _mock_predict)
+        csv_data = "text,category,source,rating\nGreat stuff!,product,web,5\n"
+        res = client.post(
+            "/feedback/import",
+            files={"file": ("std.csv", io.BytesIO(csv_data.encode()), "text/csv")},
+        )
+        job = res.json()
+        status = client.get(f"/feedback/import/{job['id']}").json()
+        assert status["status"] == "COMPLETED"
+        assert status["successful_rows"] == 1
+
+    def test_existing_review_format_still_works(self, client, monkeypatch):
+        """Standard review header continues to work."""
+        monkeypatch.setattr("services.import_service.sentiment_service.predict", _mock_predict)
+        csv_data = "review\nExcellent product!\n"
+        res = client.post(
+            "/feedback/import",
+            files={"file": ("rev.csv", io.BytesIO(csv_data.encode()), "text/csv")},
+        )
+        job = res.json()
+        status = client.get(f"/feedback/import/{job['id']}").json()
+        assert status["status"] == "COMPLETED"
+        assert status["successful_rows"] == 1
+
+    def test_existing_feedback_format_still_works(self, client, monkeypatch):
+        """Standard feedback header continues to work."""
+        monkeypatch.setattr("services.import_service.sentiment_service.predict", _mock_predict)
+        csv_data = "feedback\nI enjoyed the experience.\n"
+        res = client.post(
+            "/feedback/import",
+            files={"file": ("fb.csv", io.BytesIO(csv_data.encode()), "text/csv")},
+        )
+        job = res.json()
+        status = client.get(f"/feedback/import/{job['id']}").json()
+        assert status["status"] == "COMPLETED"
+        assert status["successful_rows"] == 1

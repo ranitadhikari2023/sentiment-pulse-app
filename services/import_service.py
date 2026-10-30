@@ -34,6 +34,73 @@ except (OverflowError, AttributeError):
 # with generous 10,000 character allowance for detailed customer reviews/transcripts.
 MAX_FEEDBACK_TEXT_LENGTH = 10000
 
+# Canonical field identifiers
+CANONICAL_FIELD_TEXT = "text"
+CANONICAL_FIELD_CATEGORY = "category"
+CANONICAL_FIELD_SOURCE = "source"
+CANONICAL_FIELD_RATING = "rating"
+
+# Explicitly documented aliases for required feedback text
+TEXT_COLUMN_ALIASES: Dict[str, str] = {
+    # Primary aliases (documented on accepted CSV spec)
+    "text": CANONICAL_FIELD_TEXT,
+    "review": CANONICAL_FIELD_TEXT,
+    "feedback": CANONICAL_FIELD_TEXT,
+    # Extended aliases
+    "review_text": CANONICAL_FIELD_TEXT,
+    "reviewtext": CANONICAL_FIELD_TEXT,
+    "feedback_text": CANONICAL_FIELD_TEXT,
+    "feedbacktext": CANONICAL_FIELD_TEXT,
+    "customer_review": CANONICAL_FIELD_TEXT,
+    "customer_reviews": CANONICAL_FIELD_TEXT,
+    "customer_feedback": CANONICAL_FIELD_TEXT,
+    "user_review": CANONICAL_FIELD_TEXT,
+    "user_reviews": CANONICAL_FIELD_TEXT,
+    "user_feedback": CANONICAL_FIELD_TEXT,
+    "content": CANONICAL_FIELD_TEXT,
+    "comment": CANONICAL_FIELD_TEXT,
+    "comments": CANONICAL_FIELD_TEXT,
+    "message": CANONICAL_FIELD_TEXT,
+    "body": CANONICAL_FIELD_TEXT,
+    # Dataset-specific aliases (e.g. Kaggle sentiment datasets)
+    "sentimenttext": CANONICAL_FIELD_TEXT,
+    "sentiment_text": CANONICAL_FIELD_TEXT,
+}
+
+CATEGORY_COLUMN_ALIASES: Dict[str, str] = {
+    "category": CANONICAL_FIELD_CATEGORY,
+    "categories": CANONICAL_FIELD_CATEGORY,
+    "tag": CANONICAL_FIELD_CATEGORY,
+    "tags": CANONICAL_FIELD_CATEGORY,
+    "topic": CANONICAL_FIELD_CATEGORY,
+    "department": CANONICAL_FIELD_CATEGORY,
+}
+
+SOURCE_COLUMN_ALIASES: Dict[str, str] = {
+    "source": CANONICAL_FIELD_SOURCE,
+    "sources": CANONICAL_FIELD_SOURCE,
+    "channel": CANONICAL_FIELD_SOURCE,
+    "platform": CANONICAL_FIELD_SOURCE,
+    "origin": CANONICAL_FIELD_SOURCE,
+}
+
+RATING_COLUMN_ALIASES: Dict[str, str] = {
+    "rating": CANONICAL_FIELD_RATING,
+    "ratings": CANONICAL_FIELD_RATING,
+    "score": CANONICAL_FIELD_RATING,
+    "stars": CANONICAL_FIELD_RATING,
+    "star_rating": CANONICAL_FIELD_RATING,
+}
+
+ALL_COLUMN_ALIASES: Dict[str, str] = {
+    **TEXT_COLUMN_ALIASES,
+    **CATEGORY_COLUMN_ALIASES,
+    **SOURCE_COLUMN_ALIASES,
+    **RATING_COLUMN_ALIASES,
+}
+
+CANDIDATE_DELIMITERS: List[str] = [",", ";", "\t", "|"]
+
 
 def sanitize_csv_cell(value: Any) -> str:
     """
@@ -72,37 +139,224 @@ class ImportService:
         """Retrieval of import job by ID."""
         return db.query(ImportJob).filter(ImportJob.id == job_id).first()
 
+    @staticmethod
+    def normalize_header(header: Any) -> str:
+        """
+        Normalizes a CSV column header:
+        - Strips leading and trailing whitespace
+        - Strips quotes (single and double quotes)
+        - Strips UTF-8/UTF-16 BOM and zero-width/invisible characters
+        - Strips Latin-1 decoded UTF-8 BOM artifact ('ï»¿')
+        - Strips whitespace again after stripping BOM
+        - Converts to lowercase
+        """
+        if header is None:
+            return ""
+        text = str(header).strip()
+        if not text:
+            return ""
+
+        # Remove quotes if present
+        text = text.strip("'\"").strip()
+
+        # Strip BOM markers and zero-width characters (covers UTF-8 \ufeff, \ufffe, zero-width spaces)
+        # Also strip 'ï»¿' which is the raw byte sequence \xef\xbb\xbf decoded as Latin-1/cp1252
+        for bom_prefix in ("\ufeff", "\ufffe", "\u200b", "\u200c", "\u200d", "\u2060", "ï»¿"):
+            if text.startswith(bom_prefix):
+                text = text[len(bom_prefix):].strip()
+
+        text = text.strip("'\"").strip().lower()
+        return text
+
+    @classmethod
+    def resolve_canonical_field(cls, header: Any) -> Optional[str]:
+        """
+        Resolves a raw header string to its canonical field name ('text', 'category', 'source', 'rating').
+        Matches exact normalized string, normalized with spaces/hyphens replaced by underscores,
+        or base name before parentheses.
+        """
+        norm = cls.normalize_header(header)
+        if not norm:
+            return None
+        if norm in ALL_COLUMN_ALIASES:
+            return ALL_COLUMN_ALIASES[norm]
+
+        # Try replacing hyphens and spaces with underscores
+        slug = norm.replace("-", "_").replace(" ", "_")
+        while "__" in slug:
+            slug = slug.replace("__", "_")
+        if slug in ALL_COLUMN_ALIASES:
+            return ALL_COLUMN_ALIASES[slug]
+
+        # Check prefix before parentheses e.g. "rating (1-5)" -> "rating"
+        base = norm.split("(")[0].strip()
+        if base and base in ALL_COLUMN_ALIASES:
+            return ALL_COLUMN_ALIASES[base]
+
+        return None
+
+    @classmethod
+    def map_header_row(
+        cls, header_row: List[str]
+    ) -> Tuple[Optional[int], Optional[int], Optional[int], Optional[int], Dict[str, int]]:
+        """
+        Maps header row to column indices:
+        Returns (text_col_idx, category_idx, source_idx, rating_idx, header_map).
+        Prioritizes primary aliases ('text', 'review', 'feedback') over extended aliases.
+        First occurrence of a column name takes precedence; duplicates are safely ignored.
+        Empty header cells are ignored.
+        """
+        col_map: Dict[str, int] = {}
+        best_text_idx: Optional[int] = None
+        best_text_priority: int = 999
+
+        category_idx: Optional[int] = None
+        source_idx: Optional[int] = None
+        rating_idx: Optional[int] = None
+
+        for idx, col in enumerate(header_row):
+            norm = cls.normalize_header(col)
+            if not norm:
+                continue
+
+            canonical = cls.resolve_canonical_field(col)
+            if not canonical:
+                continue
+
+            if norm not in col_map:
+                col_map[norm] = idx
+
+            if canonical == CANONICAL_FIELD_TEXT:
+                slug = norm.replace("-", "_").replace(" ", "_")
+                if norm == "text":
+                    prio = 1
+                elif norm == "review":
+                    prio = 2
+                elif norm == "feedback":
+                    prio = 3
+                elif slug in ("review_text", "reviewtext"):
+                    prio = 4
+                elif slug in ("feedback_text", "feedbacktext"):
+                    prio = 5
+                elif "review" in slug or "feedback" in slug:
+                    prio = 6
+                else:
+                    prio = 7
+
+                if prio < best_text_priority:
+                    best_text_priority = prio
+                    best_text_idx = idx
+
+            elif canonical == CANONICAL_FIELD_CATEGORY and category_idx is None:
+                category_idx = idx
+            elif canonical == CANONICAL_FIELD_SOURCE and source_idx is None:
+                source_idx = idx
+            elif canonical == CANONICAL_FIELD_RATING and rating_idx is None:
+                rating_idx = idx
+
+        return best_text_idx, category_idx, source_idx, rating_idx, col_map
+
+    @classmethod
+    def detect_csv_delimiter(cls, file_path: str, encoding: str) -> str:
+        """
+        Detects CSV delimiter (',', ';', '\\t', '|') safely and deterministically.
+        Reads sample lines from the file and tests candidate delimiters against header row
+        to see if any produces a valid required text column.
+        Falls back to csv.Sniffer or defaults to comma ','.
+        """
+        sample_text = ""
+        first_non_empty_line = ""
+        try:
+            with open(file_path, "r", encoding=encoding, newline="") as f:
+                for line in f:
+                    if line.strip():
+                        first_non_empty_line = line
+                        sample_text += line
+                        if len(sample_text) >= 8192:
+                            break
+                        # Read next few lines for dialect sniffer context
+                        for extra_line in f:
+                            if extra_line.strip():
+                                sample_text += extra_line
+                                if len(sample_text) >= 8192:
+                                    break
+                        break
+        except Exception as e:
+            logger.warning(f"Error reading sample for delimiter detection: {e}")
+            return ","
+
+        if not first_non_empty_line:
+            return ","
+
+        # Priority 1: Check if any candidate delimiter cleanly parses the header row
+        # into a column that maps to our required text field.
+        for delim in CANDIDATE_DELIMITERS:
+            try:
+                reader = csv.reader(io.StringIO(first_non_empty_line), delimiter=delim)
+                row = next(reader, None)
+                if row and len(row) > 1:
+                    for cell in row:
+                        if cls.resolve_canonical_field(cell) == CANONICAL_FIELD_TEXT:
+                            return delim
+            except Exception:
+                continue
+
+        # If only 1 column, but matches text column, return comma
+        try:
+            reader = csv.reader(io.StringIO(first_non_empty_line), delimiter=",")
+            row = next(reader, None)
+            if row and any(cls.resolve_canonical_field(c) == CANONICAL_FIELD_TEXT for c in row):
+                return ","
+        except Exception:
+            pass
+
+        # Priority 2: Use csv.Sniffer with candidate delimiters
+        if sample_text:
+            try:
+                sniffer = csv.Sniffer()
+                dialect = sniffer.sniff(sample_text, delimiters=",\t;|")
+                if dialect.delimiter in CANDIDATE_DELIMITERS:
+                    return dialect.delimiter
+            except Exception:
+                pass
+
+        # Priority 3: Count delimiter occurrences in first line
+        delim_counts = {d: first_non_empty_line.count(d) for d in CANDIDATE_DELIMITERS}
+        best_delim = max(delim_counts, key=delim_counts.get)
+        if delim_counts[best_delim] > 0:
+            return best_delim
+
+        return ","
+
     @classmethod
     def validate_csv_header(cls, file_path: str) -> Tuple[Optional[str], Optional[str]]:
         """
-        Fast pre-validation of CSV encoding and header row.
+        Fast pre-validation of CSV encoding, delimiter, and header row.
         Returns (encoding, error_message).
         If valid, returns (detected_encoding, None).
         If invalid, returns (None or encoding, descriptive_error_message).
         """
         encoding = cls._detect_file_encoding(file_path)
         if encoding is None:
-            return None, "Failed to decode CSV file: unsupported encoding."
+            return None, "CSV encoding is not supported. Please use UTF-8, UTF-8 BOM, or Latin-1."
 
         try:
+            delimiter = cls.detect_csv_delimiter(file_path, encoding)
             with open(file_path, "r", encoding=encoding, newline="") as csvfile:
-                reader = csv.reader(csvfile)
-                try:
-                    header_row = next(reader)
-                except StopIteration:
+                reader = csv.reader(csvfile, delimiter=delimiter)
+                header_row = None
+                for row in reader:
+                    if row and any(cell.strip() for cell in row):
+                        header_row = row
+                        break
+
+                if header_row is None:
                     return encoding, "CSV file is completely empty."
 
-                header_map = {}
-                for idx, col in enumerate(header_row):
-                    col_cleaned = col.strip().lstrip("\ufeff\ufffe").lower()
-                    header_map[col_cleaned] = idx
+                text_idx, _, _, _, _ = cls.map_header_row(header_row)
 
-                has_text_col = any(
-                    candidate in header_map
-                    for candidate in ("text", "feedback", "review", "content", "comment")
-                )
-                if not has_text_col:
-                    return encoding, "CSV must contain a 'text', 'review', or 'feedback' column."
+                if text_idx is None:
+                    return encoding, "CSV header must contain a 'text', 'review', or 'feedback' column."
 
                 return encoding, None
         except Exception as exc:
@@ -186,56 +440,51 @@ class ImportService:
             job.status = "PROCESSING"
             db.commit()
 
-            # Attempt decoding with fallback strategies in 64 KB verification blocks
+            # Attempt decoding with fallback strategies
             encoding = cls._detect_file_encoding(file_path)
             if encoding is None:
                 job.status = "FAILED"
-                job.error_summary = json.dumps(["Failed to decode CSV file: unsupported encoding."])
+                job.error_summary = json.dumps(["CSV encoding is not supported. Please use UTF-8, UTF-8 BOM, or Latin-1."])
                 job.completed_at = datetime.now(timezone.utc)
                 db.commit()
                 return job
 
+            delimiter = cls.detect_csv_delimiter(file_path, encoding)
+
             with open(file_path, "r", encoding=encoding, newline="") as csvfile:
-                reader = csv.reader(csvfile)
-                try:
-                    header_row = next(reader)
-                except StopIteration:
+                reader = csv.reader(csvfile, delimiter=delimiter)
+                header_row = None
+                for row in reader:
+                    if row and any(cell.strip() for cell in row):
+                        header_row = row
+                        break
+
+                if header_row is None:
                     job.status = "FAILED"
                     job.error_summary = json.dumps(["CSV file is completely empty."])
                     job.completed_at = datetime.now(timezone.utc)
                     db.commit()
                     return job
 
-                # Normalize header indices and strip zero-width BOM markers if present
-                header_map: Dict[str, int] = {}
-                for idx, col in enumerate(header_row):
-                    col_cleaned = col.strip().lstrip("\ufeff\ufffe").lower()
-                    header_map[col_cleaned] = idx
-
-                # Locate text column
-                text_col_idx = None
-                for candidate in ("text", "feedback", "review", "content", "comment"):
-                    if candidate in header_map:
-                        text_col_idx = header_map[candidate]
-                        break
+                text_col_idx, category_idx, source_idx, rating_idx, _ = cls.map_header_row(header_row)
 
                 if text_col_idx is None:
                     job.status = "FAILED"
-                    job.error_summary = json.dumps(["CSV must contain a 'text', 'review', or 'feedback' column."])
+                    job.error_summary = json.dumps(["CSV header must contain a 'text', 'review', or 'feedback' column."])
                     job.completed_at = datetime.now(timezone.utc)
                     db.commit()
                     return job
 
-                category_idx = header_map.get("category")
-                source_idx = header_map.get("source")
-                rating_idx = header_map.get("rating")
+                # Count non-empty data rows in a streaming pass to bound memory while calculating exact count
+                total_data_rows = 0
+                for row in reader:
+                    if row and any(cell.strip() for cell in row):
+                        total_data_rows += 1
 
-                # Count rows in a streaming pass to bound memory while calculating exact count
-                total_data_rows = sum(1 for _ in reader)
                 if total_data_rows > settings.MAX_IMPORT_ROWS:
                     job.status = "FAILED"
                     job.error_summary = json.dumps([
-                        f"CSV exceeds maximum allowed rows ({total_data_rows} > {settings.MAX_IMPORT_ROWS})."
+                        f"CSV exceeds maximum allowed rows ({total_data_rows} > {settings.MAX_IMPORT_ROWS}). Maximum batch limit is {settings.MAX_IMPORT_ROWS:,} records."
                     ])
                     job.completed_at = datetime.now(timezone.utc)
                     db.commit()
@@ -253,8 +502,12 @@ class ImportService:
 
                 # Rewind file to start of rows for bounded chunk processing
                 csvfile.seek(0)
-                reader = csv.reader(csvfile)
-                next(reader)  # Skip header row
+                reader = csv.reader(csvfile, delimiter=delimiter)
+
+                # Skip blank lines and header row
+                for row in reader:
+                    if row and any(cell.strip() for cell in row):
+                        break
 
                 chunk_size = settings.IMPORT_CHUNK_SIZE
                 errors: List[str] = []
@@ -262,6 +515,10 @@ class ImportService:
                 processed_so_far = 0
 
                 for row in reader:
+                    # Skip empty rows safely
+                    if not row or not any(cell.strip() for cell in row):
+                        continue
+
                     current_chunk.append(row)
                     if len(current_chunk) >= chunk_size:
                         cls._process_row_chunk(
@@ -310,7 +567,7 @@ class ImportService:
                     failed_job.successful_rows = 0
                     failed_job.failed_rows = failed_job.total_rows or job.total_rows
                     failed_job.error_summary = json.dumps([
-                        f"CSV parsing error: field exceeds maximum allowed size (1 MB) or malformed quotes ({str(csv_err)})."
+                        f"CSV parsing error: field exceeds maximum allowed size (1 MB) or malformed quotes ({str(csv_err)}). CSV parsing failed. Please check the file format and quoting."
                     ])
                     failed_job.completed_at = datetime.now(timezone.utc)
                     db.commit()
@@ -321,7 +578,7 @@ class ImportService:
             job.status = "FAILED"
             job.successful_rows = 0
             job.failed_rows = job.total_rows
-            job.error_summary = json.dumps([f"CSV parsing error: {str(csv_err)}"])
+            job.error_summary = json.dumps([f"CSV parsing error: field exceeds maximum allowed size (1 MB) or malformed quotes ({str(csv_err)}). CSV parsing failed. Please check the file format and quoting."])
             return job
 
         except Exception as exc:
@@ -353,8 +610,22 @@ class ImportService:
     def _detect_file_encoding(file_path: str) -> Optional[str]:
         """
         Detects valid encoding by reading small chunks without loading the entire file into memory.
-        Supports utf-8-sig (handles UTF-8 BOM), utf-8, latin-1, and cp1252.
+        Supports utf-8-sig (handles UTF-8 BOM and standard UTF-8), latin-1, and cp1252.
+        Rejects unsupported encodings such as UTF-16 and binary.
         """
+        # First check raw leading bytes for BOM markers
+        try:
+            with open(file_path, "rb") as f:
+                lead = f.read(4)
+                if lead.startswith(b"\xef\xbb\xbf"):
+                    return "utf-8-sig"
+                if lead.startswith((b"\xff\xfe", b"\xfe\xff")):
+                    # UTF-16 is unsupported per spec
+                    return None
+        except Exception:
+            pass
+
+        # Try utf-8-sig and utf-8
         for enc in ("utf-8-sig", "utf-8"):
             try:
                 with open(file_path, "r", encoding=enc, errors="strict") as f:
@@ -364,6 +635,7 @@ class ImportService:
             except UnicodeDecodeError:
                 continue
 
+        # Fallback to Latin-1 / cp1252
         for enc in ("latin-1", "cp1252"):
             try:
                 with open(file_path, "r", encoding=enc, errors="strict") as f:
@@ -390,6 +662,11 @@ class ImportService:
 
         for offset, row in enumerate(chunk):
             row_idx = start_row_idx + offset
+
+            # Skip empty rows inside chunk if any passed through
+            if not row or not any(cell.strip() for cell in row):
+                continue
+
             if text_col_idx >= len(row):
                 errors.append(f"Row {row_idx}: Missing text column.")
                 job.failed_rows += 1

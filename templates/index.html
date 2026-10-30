@@ -1495,17 +1495,23 @@
           
           <!-- Specifications Card -->
           <div class="saas-card p-6 space-y-3 text-xs text-slate-600 dark:text-slate-400">
-            <h3 class="text-xs font-bold uppercase tracking-wider text-slate-700 dark:text-slate-300">Accepted CSV Format</h3>
-            <p class="leading-relaxed">Your CSV file must include a header row with a text column. The system recognizes the following column names:</p>
+            <div class="flex items-center justify-between">
+              <h3 class="text-xs font-bold uppercase tracking-wider text-slate-700 dark:text-slate-300">Accepted CSV Format</h3>
+              <button type="button" id="import-sample-template-btn" class="text-[11px] text-indigo-600 dark:text-indigo-400 hover:underline font-medium flex items-center space-x-1 cursor-pointer">
+                <span>📥</span>
+                <span>Download Sample Template</span>
+              </button>
+            </div>
+            <p class="leading-relaxed">Your CSV file must include a header row with a text column. The system recognizes the following column names and aliases:</p>
             
             <div class="space-y-1.5 font-mono text-[11px] bg-slate-50 dark:bg-slate-900 p-3 rounded-xl border border-slate-200 dark:border-slate-800">
-              <div><span class="text-emerald-600 font-bold">text</span> (or <span class="text-emerald-600">review</span>, <span class="text-emerald-600">feedback</span>) [Required]</div>
+              <div><span class="text-emerald-600 font-bold">text</span> (or <span class="text-emerald-600">review</span>, <span class="text-emerald-600">feedback</span>, <span class="text-emerald-600">review_text</span>, <span class="text-emerald-600">SentimentText</span>) [Required]</div>
               <div><span class="text-indigo-500">category</span> [Optional, e.g. Support, Product]</div>
               <div><span class="text-indigo-500">source</span> [Optional, e.g. Web, Email, Survey]</div>
               <div><span class="text-indigo-500">rating</span> [Optional, 1–5 integer]</div>
             </div>
 
-            <p class="text-[11px] text-slate-400">Encodings supported: UTF-8, UTF-8-BOM, Latin-1.</p>
+            <p class="text-[11px] text-slate-400">Encodings supported: UTF-8, UTF-8 BOM, Latin-1. Delimiters: Comma (,), Semicolon (;), Tab (\t), Pipe (|).</p>
           </div>
 
           <!-- Secure Export Card -->
