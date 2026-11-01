@@ -5,11 +5,15 @@
  */
 
 const MAX_UPLOAD_BYTES = 100 * 1024 * 1024; // 100 MB (104,857,600 bytes)
+const MAX_IMPORT_ROWS = 1050000;
+const MAX_IMPORT_ROWS_FORMATTED = '1,050,000';
 
 const ImportsController = {
   selectedFile: null,
   isUploading: false,
   MAX_UPLOAD_BYTES: MAX_UPLOAD_BYTES,
+  MAX_IMPORT_ROWS: MAX_IMPORT_ROWS,
+  MAX_IMPORT_ROWS_FORMATTED: MAX_IMPORT_ROWS_FORMATTED,
   pollingInterval: null,
   _lastProgressPct: 0,
   _consecutivePollErrors: 0,
@@ -655,9 +659,13 @@ const ImportsController = {
 
 if (typeof window !== 'undefined') {
   window.MAX_UPLOAD_BYTES = MAX_UPLOAD_BYTES;
+  window.MAX_IMPORT_ROWS = MAX_IMPORT_ROWS;
+  window.MAX_IMPORT_ROWS_FORMATTED = MAX_IMPORT_ROWS_FORMATTED;
   window.ImportsController = ImportsController;
 }
 if (typeof globalThis !== 'undefined') {
   globalThis.MAX_UPLOAD_BYTES = MAX_UPLOAD_BYTES;
+  globalThis.MAX_IMPORT_ROWS = MAX_IMPORT_ROWS;
+  globalThis.MAX_IMPORT_ROWS_FORMATTED = MAX_IMPORT_ROWS_FORMATTED;
   globalThis.ImportsController = ImportsController;
 }

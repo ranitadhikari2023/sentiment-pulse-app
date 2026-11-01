@@ -500,7 +500,7 @@ class ImportService:
                     job.failed_rows = 0
                     job.status = "FAILED"
                     job.error_summary = json.dumps([
-                        f"CSV exceeds maximum allowed rows ({total_data_rows} > {settings.MAX_IMPORT_ROWS}). Maximum batch limit is {settings.MAX_IMPORT_ROWS:,} records."
+                        f"CSV exceeds maximum allowed rows ({total_data_rows} > {settings.MAX_IMPORT_ROWS}). Maximum batch limit is {settings.MAX_IMPORT_ROWS_FORMATTED} records."
                     ])
                     job.completed_at = datetime.now(timezone.utc)
                     db.commit()
@@ -529,7 +529,7 @@ class ImportService:
                     if row and any(cell.strip() for cell in row):
                         break
 
-                chunk_size = settings.IMPORT_CHUNK_SIZE
+                chunk_size = getattr(settings, "DB_INSERT_CHUNK_SIZE", settings.IMPORT_CHUNK_SIZE)
                 errors: List[str] = []
                 current_chunk: List[List[str]] = []
                 processed_so_far = 0
@@ -688,20 +688,23 @@ class ImportService:
                 continue
 
             if text_col_idx >= len(row):
-                errors.append(f"Row {row_idx}: Missing text column.")
+                if len(errors) < 100:
+                    errors.append(f"Row {row_idx}: Missing text column.")
                 job.failed_rows += 1
                 continue
 
             raw_text = row[text_col_idx].strip()
             if not raw_text:
-                errors.append(f"Row {row_idx}: Empty text.")
+                if len(errors) < 100:
+                    errors.append(f"Row {row_idx}: Empty text.")
                 job.failed_rows += 1
                 continue
 
             if len(raw_text) > MAX_FEEDBACK_TEXT_LENGTH:
-                errors.append(
-                    f"Row {row_idx}: Text exceeds maximum allowed length ({MAX_FEEDBACK_TEXT_LENGTH:,} characters)."
-                )
+                if len(errors) < 100:
+                    errors.append(
+                        f"Row {row_idx}: Text exceeds maximum allowed length ({MAX_FEEDBACK_TEXT_LENGTH:,} characters)."
+                    )
                 job.failed_rows += 1
                 continue
 
@@ -746,7 +749,8 @@ class ImportService:
                 new_records.append(fb)
                 job.successful_rows += 1
             except Exception as e:
-                errors.append(f"Row {row_idx}: Inference failed - {str(e)}")
+                if len(errors) < 100:
+                    errors.append(f"Row {row_idx}: Inference failed - {str(e)}")
                 job.failed_rows += 1
 
         if new_records:

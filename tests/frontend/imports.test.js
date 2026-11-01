@@ -661,11 +661,11 @@ describe('Imports Controller & 100 MB Limit Subsystem', () => {
       const oversizedJob = {
         id: 'job-oversized-1',
         status: 'FAILED',
-        total_rows: 1048575,
+        total_rows: 1050001,
         successful_rows: 0,
         failed_rows: 0,
         error_summary: JSON.stringify([
-          'CSV exceeds maximum allowed rows (1048575 > 5000). Maximum batch limit is 5,000 records.',
+          'CSV exceeds maximum allowed rows (1050001 > 1050000). Maximum batch limit is 1,050,000 records.',
         ]),
       };
 
@@ -673,7 +673,7 @@ describe('Imports Controller & 100 MB Limit Subsystem', () => {
 
       assert.equal(
         elements['import-stat-total'].textContent,
-        1048575,
+        1050001,
         'Detected records must reflect actual parsed row count'
       );
       assert.equal(
@@ -701,10 +701,10 @@ describe('Imports Controller & 100 MB Limit Subsystem', () => {
       const failedJob = {
         id: 'job-race-1',
         status: 'FAILED',
-        total_rows: 1048575,
+        total_rows: 1050001,
         successful_rows: 0,
         failed_rows: 0,
-        error_summary: JSON.stringify(['CSV exceeds maximum allowed rows (1048575 > 5000).']),
+        error_summary: JSON.stringify(['CSV exceeds maximum allowed rows (1050001 > 1050000).']),
       };
 
       // 1. Job fails and transitions to terminal state

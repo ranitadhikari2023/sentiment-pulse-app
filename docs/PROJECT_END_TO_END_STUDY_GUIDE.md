@@ -812,7 +812,7 @@ Linguistic Sanity Check (check_handwritten.py):
    * *Root Cause:* The underlying training data (`yelp_review_full`) consists primarily of polarized 1-star and 5-star customer reviews. Factual statements in reviews often discuss problems, causing a slight negative bias on neutral statements.
 2. **Synchronous CSV Ingestion Execution (Reliability Debt):**
    * *Evidence:* In `api/routes/imports.py:_upload_handler()`, `ImportService.process_csv_bytes()` is called synchronously inside the request handler.
-   * *Impact:* While chunking persists records every 100 rows, processing a large 5,000-row file can take 70–100 seconds, risking an HTTP gateway timeout on platforms like Render (default 30–100s).
+   * *Impact:* Processing large CSV files (up to 1,050,000 rows) is offloaded to background task execution with 2,000-record chunks and bounded streaming memory, avoiding HTTP gateway timeouts on platforms like Render (default 30–100s).
 3. **Lack of Automated Test Database Isolation (Testing Debt):**
    * *Evidence:* Backend test suites (`test_feedback_api.py`, `test_analytics.py`, `test_imports_exports.py`) import `main.app`, which binds to `sentiment.db` if `DATABASE_URL` is not manually overridden in the environment.
    * *Risk:* Running `pytest` without an explicit temporary database environment variable injects test rows into the local development database.

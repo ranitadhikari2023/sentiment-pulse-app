@@ -5,7 +5,7 @@ Authentication and email verification settings have been permanently removed.
 """
 
 import os
-from typing import List
+from typing import List, Optional
 import logging
 from dotenv import load_dotenv
 
@@ -64,8 +64,27 @@ class Settings:
     MAX_IMPORT_FILE_SIZE_BYTES: int = int(
         os.getenv("MAX_IMPORT_FILE_SIZE_BYTES", str(100 * 1024 * 1024))
     )  # 100 MB (104,857,600 bytes)
-    MAX_IMPORT_ROWS: int = int(os.getenv("MAX_IMPORT_ROWS", "5000"))
-    IMPORT_CHUNK_SIZE: int = int(os.getenv("IMPORT_CHUNK_SIZE", "100"))
+    MAX_UPLOAD_FILE_SIZE: int = MAX_IMPORT_FILE_SIZE_BYTES
+    MAX_IMPORT_ROWS: int = int(
+        os.getenv("MAX_IMPORT_ROWS", "1050000")
+    )
+    DB_INSERT_CHUNK_SIZE: int = int(
+        os.getenv("DB_INSERT_CHUNK_SIZE", os.getenv("IMPORT_CHUNK_SIZE", "2000"))
+    )
+    IMPORT_CHUNK_SIZE: int = DB_INSERT_CHUNK_SIZE
+
+    _max_import_rows_formatted: Optional[str] = None
+
+    @property
+    def MAX_IMPORT_ROWS_FORMATTED(self) -> str:
+        """Returns international human-readable representation, e.g. '1,050,000'."""
+        if self._max_import_rows_formatted is not None:
+            return self._max_import_rows_formatted
+        return f"{self.MAX_IMPORT_ROWS:,}"
+
+    @MAX_IMPORT_ROWS_FORMATTED.setter
+    def MAX_IMPORT_ROWS_FORMATTED(self, value: str) -> None:
+        self._max_import_rows_formatted = value
 
     # Model & Tokenizer Paths
     MODEL_PATH: str = os.getenv("MODEL_PATH", os.path.join(BASE_DIR, "sentiment_model.onnx"))

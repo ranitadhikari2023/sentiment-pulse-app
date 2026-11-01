@@ -246,17 +246,44 @@ def test_csv_with_no_data_rows(client):
     assert any("contains no data rows" in e for e in errors)
 
 
-def test_csv_row_count_exceeding_5000_rejected(client):
+def test_csv_row_count_exceeding_1050000_rejected(client):
     """
-    Verifies that CSV files containing more than 5,000 data rows
+    Verifies that CSV files containing more than 1,050,000 data rows (1,050,000)
     are safely rejected without partial ingestion.
     """
-    # 5,001 data rows
-    lines = ["text,category,rating\n"] + [f"Review row {i},General,4\n" for i in range(5001)]
-    csv_content = "".join(lines)
+    class OversizedCSVStream(io.RawIOBase):
+        def __init__(self, num_rows=1050001):
+            self.num_rows = num_rows
+            self.header = b"text,category,rating\n"
+            self.row_template = b"Review,General,4\n"
+            self.header_sent = False
+            self.rows_sent = 0
+            self.buffer = b""
+
+        def readable(self):
+            return True
+
+        def readinto(self, b):
+            if not self.header_sent:
+                self.buffer += self.header
+                self.header_sent = True
+
+            while len(self.buffer) < len(b) and self.rows_sent < self.num_rows:
+                batch = min(10000, self.num_rows - self.rows_sent)
+                self.buffer += self.row_template * batch
+                self.rows_sent += batch
+
+            if not self.buffer:
+                return 0
+
+            n = min(len(b), len(self.buffer))
+            b[:n] = self.buffer[:n]
+            self.buffer = self.buffer[n:]
+            return n
+
     res = client.post(
         "/feedback/import",
-        files={"file": ("too_many_rows.csv", io.BytesIO(csv_content.encode("utf-8")), "text/csv")}
+        files={"file": ("too_many_rows.csv", OversizedCSVStream(1050001), "text/csv")}
     )
     assert res.status_code == 202
     job = res.json()
@@ -264,8 +291,12 @@ def test_csv_row_count_exceeding_5000_rejected(client):
     assert status_res.status_code == 200
     final_job = status_res.json()
     assert final_job["status"] == "FAILED"
+    assert final_job["total_rows"] == 1050001
+    assert final_job["successful_rows"] == 0
+    assert final_job["failed_rows"] == 0
     errors = json.loads(final_job["error_summary"])
-    assert any("exceeds maximum allowed rows (5001 > 5000)" in e for e in errors)
+    assert any("1050001 > 1050000" in e for e in errors)
+    assert any("Maximum batch limit is 1,050,000 records" in e for e in errors)
 
 
 def test_supported_encodings(client):
@@ -1846,8 +1877,28 @@ class TestSentimentTextDatasetCompatibility:
 class TestRowCountValidationAndLargeDatasets:
     """Tests for exact row count boundaries, large datasets, and accurate statistics."""
 
+    def test_4999_rows_accepted(self, client, monkeypatch):
+        """Verifies that 4,999 data records are accepted."""
+        monkeypatch.setattr("services.import_service.sentiment_service.predict", _mock_predict)
+        header = "text,category,source,rating\n"
+        data_rows = "".join(f'"Feedback row {i}",Product,Web,5\n' for i in range(4999))
+        csv_bytes = (header + data_rows).encode("utf-8")
+
+        res = client.post(
+            "/feedback/import",
+            files={"file": ("exact_4999.csv", io.BytesIO(csv_bytes), "text/csv")},
+        )
+        assert res.status_code == 202
+        job_init = res.json()
+
+        status_res = client.get(f"/feedback/import/{job_init['id']}").json()
+        assert status_res["status"] == "COMPLETED"
+        assert status_res["total_rows"] == 4999
+        assert status_res["successful_rows"] == 4999
+        assert status_res["failed_rows"] == 0
+
     def test_exact_5000_rows_accepted(self, client, monkeypatch):
-        """Verifies that exactly 5,000 data records (boundary maximum) are accepted."""
+        """Verifies that exactly 5,000 data records are accepted."""
         monkeypatch.setattr("services.import_service.sentiment_service.predict", _mock_predict)
 
         # 5,000 data rows
@@ -1868,45 +1919,144 @@ class TestRowCountValidationAndLargeDatasets:
         assert status_res["successful_rows"] == 5000
         assert status_res["failed_rows"] == 0
 
-    def test_5001_rows_rejected_stores_accurate_total(self, client):
+    def test_5001_rows_accepted(self, client, monkeypatch):
         """
-        Verifies that 5,001 data rows (boundary + 1) are rejected,
-        and total_rows is accurately stored as 5001 in the ImportJob.
+        Verifies that 5,001 data rows (formerly the rejection boundary)
+        are accepted cleanly under the 1,050,000 limit.
         """
+        monkeypatch.setattr("services.import_service.sentiment_service.predict", _mock_predict)
         header = "text,category,source,rating\n"
         data_rows = "".join(f'"Feedback row {i}",Product,Web,5\n' for i in range(5001))
         csv_bytes = (header + data_rows).encode("utf-8")
 
         res = client.post(
             "/feedback/import",
-            files={"file": ("too_many_5001.csv", io.BytesIO(csv_bytes), "text/csv")},
+            files={"file": ("exact_5001.csv", io.BytesIO(csv_bytes), "text/csv")},
         )
         assert res.status_code == 202
         job_init = res.json()
 
         status_res = client.get(f"/feedback/import/{job_init['id']}").json()
-        assert status_res["status"] == "FAILED"
-        assert status_res["total_rows"] == 5001, f"Expected total_rows=5001, got {status_res['total_rows']}"
-        assert status_res["successful_rows"] == 0
+        assert status_res["status"] == "COMPLETED"
+        assert status_res["total_rows"] == 5001
+        assert status_res["successful_rows"] == 5001
         assert status_res["failed_rows"] == 0
-        errors = json.loads(status_res["error_summary"])
-        assert any("5001 > 5000" in e for e in errors)
-        assert any("Maximum batch limit is 5,000 records" in e for e in errors)
 
-    def test_large_dataset_1048575_rows_rejected_safely(self, client):
+    def test_100000_rows_accepted_streaming(self, client, monkeypatch):
+        """
+        Verifies that 100,000 records stream through preflight counting,
+        rewinding, and chunk processing cleanly.
+        """
+        def _mock_fast_chunk(db, job, chunk, start_row_idx, text_col_idx, category_idx, source_idx, rating_idx, errors):
+            job.successful_rows += len(chunk)
+            job.processed_rows += len(chunk)
+
+        monkeypatch.setattr(ImportService, "_process_row_chunk", _mock_fast_chunk)
+
+        class SyntheticCSVStream(io.RawIOBase):
+            def __init__(self, num_rows):
+                self.num_rows = num_rows
+                self.header = b"text,category,source,rating\n"
+                self.row_template = b'"Streaming feedback",Product,Web,5\n'
+                self.header_sent = False
+                self.rows_sent = 0
+                self.buffer = b""
+
+            def readable(self):
+                return True
+
+            def readinto(self, b):
+                if not self.header_sent:
+                    self.buffer += self.header
+                    self.header_sent = True
+                while len(self.buffer) < len(b) and self.rows_sent < self.num_rows:
+                    batch = min(10000, self.num_rows - self.rows_sent)
+                    self.buffer += self.row_template * batch
+                    self.rows_sent += batch
+                if not self.buffer:
+                    return 0
+                n = min(len(b), len(self.buffer))
+                b[:n] = self.buffer[:n]
+                self.buffer = self.buffer[n:]
+                return n
+
+        stream = SyntheticCSVStream(num_rows=100000)
+        res = client.post(
+            "/feedback/import",
+            files={"file": ("stream_100k.csv", stream, "text/csv")},
+        )
+        assert res.status_code == 202
+        job_init = res.json()
+
+        status_res = client.get(f"/feedback/import/{job_init['id']}").json()
+        assert status_res["status"] == "COMPLETED"
+        assert status_res["total_rows"] == 100000
+        assert status_res["successful_rows"] == 100000
+        assert status_res["failed_rows"] == 0
+
+    def test_1000000_rows_accepted_streaming(self, client, monkeypatch):
+        """
+        Verifies that 1,000,000 records stream through preflight counting,
+        rewinding, and chunk processing cleanly.
+        """
+        def _mock_fast_chunk(db, job, chunk, start_row_idx, text_col_idx, category_idx, source_idx, rating_idx, errors):
+            job.successful_rows += len(chunk)
+            job.processed_rows += len(chunk)
+
+        monkeypatch.setattr(ImportService, "_process_row_chunk", _mock_fast_chunk)
+
+        class SyntheticCSVStream(io.RawIOBase):
+            def __init__(self, num_rows):
+                self.num_rows = num_rows
+                self.header = b"text,category,source,rating\n"
+                self.row_template = b'"Streaming feedback",Product,Web,5\n'
+                self.header_sent = False
+                self.rows_sent = 0
+                self.buffer = b""
+
+            def readable(self):
+                return True
+
+            def readinto(self, b):
+                if not self.header_sent:
+                    self.buffer += self.header
+                    self.header_sent = True
+                while len(self.buffer) < len(b) and self.rows_sent < self.num_rows:
+                    batch = min(20000, self.num_rows - self.rows_sent)
+                    self.buffer += self.row_template * batch
+                    self.rows_sent += batch
+                if not self.buffer:
+                    return 0
+                n = min(len(b), len(self.buffer))
+                b[:n] = self.buffer[:n]
+                self.buffer = self.buffer[n:]
+                return n
+
+        stream = SyntheticCSVStream(num_rows=1000000)
+        res = client.post(
+            "/feedback/import",
+            files={"file": ("stream_1m.csv", stream, "text/csv")},
+        )
+        assert res.status_code == 202
+        job_init = res.json()
+
+        status_res = client.get(f"/feedback/import/{job_init['id']}").json()
+        assert status_res["status"] == "COMPLETED"
+        assert status_res["total_rows"] == 1000000
+        assert status_res["successful_rows"] == 1000000
+        assert status_res["failed_rows"] == 0
+
+    def test_1048575_rows_accepted_safely(self, client, monkeypatch):
         """
         Verifies that a dataset with 1,048,575 rows (the production issue dataset)
-        is safely rejected before ingestion, total_rows is stored as 1,048,575,
-        and zero feedback records are persisted.
+        is now safely accepted and processed under the new 1,050,000 row capacity limit.
         """
-        from db.session import SessionLocal
-        from db.models import Feedback
+        def _mock_fast_chunk(db, job, chunk, start_row_idx, text_col_idx, category_idx, source_idx, rating_idx, errors):
+            job.successful_rows += len(chunk)
+            job.processed_rows += len(chunk)
 
-        db = SessionLocal()
-        initial_feedback_count = db.query(Feedback).count()
-        db.close()
+        monkeypatch.setattr(ImportService, "_process_row_chunk", _mock_fast_chunk)
 
-        # Generate 1,048,575 lines in a generator stream (approx 9.5 MB)
         class MillionRowCSVStream(io.RawIOBase):
             def __init__(self, num_rows=1048575):
                 self.num_rows = num_rows
@@ -1925,7 +2075,7 @@ class TestRowCountValidationAndLargeDatasets:
                     self.header_sent = True
 
                 while len(self.buffer) < len(b) and self.rows_sent < self.num_rows:
-                    batch = min(10000, self.num_rows - self.rows_sent)
+                    batch = min(20000, self.num_rows - self.rows_sent)
                     self.buffer += self.row_template * batch
                     self.rows_sent += batch
 
@@ -1946,12 +2096,126 @@ class TestRowCountValidationAndLargeDatasets:
         job_init = res.json()
 
         status_res = client.get(f"/feedback/import/{job_init['id']}").json()
+        assert status_res["status"] == "COMPLETED"
+        assert status_res["total_rows"] == 1048575
+        assert status_res["successful_rows"] == 1048575
+        assert status_res["failed_rows"] == 0
+
+    def test_exact_1050000_rows_accepted_boundary(self, client, monkeypatch):
+        """
+        BOUNDARY MAXIMUM TEST:
+        Verifies that exactly 1,050,000 data records (boundary maximum)
+        are accepted and processed successfully.
+        """
+        def _mock_fast_chunk(db, job, chunk, start_row_idx, text_col_idx, category_idx, source_idx, rating_idx, errors):
+            job.successful_rows += len(chunk)
+            job.processed_rows += len(chunk)
+
+        monkeypatch.setattr(ImportService, "_process_row_chunk", _mock_fast_chunk)
+
+        class BoundaryCSVStream(io.RawIOBase):
+            def __init__(self, num_rows=1050000):
+                self.num_rows = num_rows
+                self.header = b"text,category,source,rating\n"
+                self.row_template = b'"Boundary text",Product,Web,5\n'
+                self.header_sent = False
+                self.rows_sent = 0
+                self.buffer = b""
+
+            def readable(self):
+                return True
+
+            def readinto(self, b):
+                if not self.header_sent:
+                    self.buffer += self.header
+                    self.header_sent = True
+
+                while len(self.buffer) < len(b) and self.rows_sent < self.num_rows:
+                    batch = min(20000, self.num_rows - self.rows_sent)
+                    self.buffer += self.row_template * batch
+                    self.rows_sent += batch
+
+                if not self.buffer:
+                    return 0
+
+                n = min(len(b), len(self.buffer))
+                b[:n] = self.buffer[:n]
+                self.buffer = self.buffer[n:]
+                return n
+
+        stream = BoundaryCSVStream(num_rows=1050000)
+        res = client.post(
+            "/feedback/import",
+            files={"file": ("exact_1050000.csv", stream, "text/csv")},
+        )
+        assert res.status_code == 202
+        job_init = res.json()
+
+        status_res = client.get(f"/feedback/import/{job_init['id']}").json()
+        assert status_res["status"] == "COMPLETED"
+        assert status_res["total_rows"] == 1050000
+        assert status_res["successful_rows"] == 1050000
+        assert status_res["failed_rows"] == 0
+
+    def test_1050001_rows_rejected_safely(self, client):
+        """
+        BOUNDARY EXCEEDED TEST (1,050,001 data rows = limit + 1):
+        Verifies that a dataset with 1,050,001 data rows is rejected BEFORE ingestion,
+        total_rows is stored accurately as 1,050,001, and zero feedback records are persisted.
+        """
+        from db.session import SessionLocal
+        from db.models import Feedback
+
+        db = SessionLocal()
+        initial_feedback_count = db.query(Feedback).count()
+        db.close()
+
+        class ExceededCSVStream(io.RawIOBase):
+            def __init__(self, num_rows=1050001):
+                self.num_rows = num_rows
+                self.header = b"text,category,source,rating\n"
+                self.row_template = b'"Too many rows",Product,Web,5\n'
+                self.header_sent = False
+                self.rows_sent = 0
+                self.buffer = b""
+
+            def readable(self):
+                return True
+
+            def readinto(self, b):
+                if not self.header_sent:
+                    self.buffer += self.header
+                    self.header_sent = True
+
+                while len(self.buffer) < len(b) and self.rows_sent < self.num_rows:
+                    batch = min(20000, self.num_rows - self.rows_sent)
+                    self.buffer += self.row_template * batch
+                    self.rows_sent += batch
+
+                if not self.buffer:
+                    return 0
+
+                n = min(len(b), len(self.buffer))
+                b[:n] = self.buffer[:n]
+                self.buffer = self.buffer[n:]
+                return n
+
+        stream = ExceededCSVStream(num_rows=1050001)
+        res = client.post(
+            "/feedback/import",
+            files={"file": ("too_many_1050001.csv", stream, "text/csv")},
+        )
+        assert res.status_code == 202
+        job_init = res.json()
+
+        status_res = client.get(f"/feedback/import/{job_init['id']}").json()
         assert status_res["status"] == "FAILED"
-        assert status_res["total_rows"] == 1048575, f"Expected total_rows=1048575, got {status_res['total_rows']}"
+        assert status_res["total_rows"] == 1050001, f"Expected total_rows=1050001, got {status_res['total_rows']}"
         assert status_res["successful_rows"] == 0
         assert status_res["failed_rows"] == 0
         errors = json.loads(status_res["error_summary"])
-        assert any("1048575 > 5000" in e for e in errors)
+        assert any("1050001 > 1050000" in e for e in errors)
+        assert any("Maximum batch limit is 1,050,000 records" in e for e in errors)
 
         # Confirm zero records were persisted in DB
         db2 = SessionLocal()

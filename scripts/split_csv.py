@@ -1,10 +1,10 @@
 """
 Sentiment Pulse - CSV Batch Splitter Utility (split_csv.py)
 Splits large CSV files (e.g. 1,000,000+ records) into RFC 4180 compliant batches
-of at most 5,000 records each, preserving original headers and quoted fields.
+of at most 1,050,000 records each, preserving original headers and quoted fields.
 
 Usage:
-    python scripts/split_csv.py <input_file.csv> [--batch-size 5000] [--output-dir ./batches]
+    python scripts/split_csv.py <input_file.csv> [--batch-size 1050000] [--output-dir ./batches]
 """
 
 import os
@@ -48,7 +48,7 @@ def detect_delimiter(file_path: str, encoding: str) -> str:
 
 def split_csv_file(
     input_path: str,
-    batch_size: int = 5000,
+    batch_size: int = 1050000,
     output_dir: Optional[str] = None
 ) -> int:
     """
@@ -127,9 +127,9 @@ def _write_batch(out_dir: str, base_name: str, batch_num: int, header: list, row
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Split large CSV into 5,000-record batches for Sentiment Pulse.")
+    parser = argparse.ArgumentParser(description="Split large CSV into 1,050,000-record batches for Sentiment Pulse.")
     parser.add_argument("input_file", help="Path to the large CSV file")
-    parser.add_argument("--batch-size", type=int, default=5000, help="Max records per batch (default: 5000)")
+    parser.add_argument("--batch-size", type=int, default=1050000, help="Max records per batch (default: 1050000)")
     parser.add_argument("--output-dir", help="Output directory for generated batches")
 
     args = parser.parse_args()
