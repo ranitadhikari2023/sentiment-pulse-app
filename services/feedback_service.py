@@ -20,7 +20,7 @@ logger = get_logger(__name__)
 
 class FeedbackService:
     @staticmethod
-    def create_feedback(db: Session, payload: FeedbackCreate) -> Feedback:
+    def create_feedback(db: Session, payload: FeedbackCreate, user_id: Optional[int] = None) -> Feedback:
         """
         Runs sentiment inference on incoming customer feedback, persists record,
         and returns the created model.
@@ -32,7 +32,7 @@ class FeedbackService:
         clean_source = payload.source.strip() if payload.source and payload.source.strip() else "web"
 
         feedback = Feedback(
-            user_id=None,
+            user_id=user_id,
             text=payload.text,
             clean_text=prediction.get("text", payload.text),
             sentiment=prediction.get("sentiment", "unknown"),
@@ -92,7 +92,8 @@ class FeedbackService:
         end_date: Optional[datetime] = None,
         search: Optional[str] = None,
         sort_by: str = "created_at",
-        sort_order: str = "desc"
+        sort_order: str = "desc",
+        user_id: Optional[int] = None
     ) -> FeedbackListResponse:
         """
         Retrieves paginated feedback records with multi-criteria filtering across the database.
@@ -101,6 +102,9 @@ class FeedbackService:
         page_size = min(max(1, page_size), 100)  # Bound between 1 and 100
 
         query = db.query(Feedback)
+
+        if user_id is not None:
+            query = query.filter(Feedback.user_id == user_id)
 
         # Filters
         if sentiment:
@@ -140,12 +144,16 @@ class FeedbackService:
         )
 
     @staticmethod
-    def get_feedback_stats(db: Session) -> FeedbackStatsResponse:
+    def get_feedback_stats(db: Session, user_id: Optional[int] = None) -> FeedbackStatsResponse:
         """
         Aggregates summary sentiment statistics across all feedback records.
         """
+        base_query = db.query(Feedback)
+        if user_id is not None:
+            base_query = base_query.filter(Feedback.user_id == user_id)
+
         # Count by sentiment
-        counts = db.query(
+        counts = base_query.with_entities(
             Feedback.sentiment,
             func.count(Feedback.id)
         ).group_by(
@@ -164,11 +172,12 @@ class FeedbackService:
         neg_pct = round((neg / total) * 100, 2) if total > 0 else 0.0
 
         # Average confidence
-        avg_conf = db.query(func.avg(Feedback.confidence)).scalar()
+        avg_conf_query = base_query.with_entities(func.avg(Feedback.confidence))
+        avg_conf = avg_conf_query.scalar()
         avg_conf = round(float(avg_conf), 3) if avg_conf is not None else 0.0
 
         # Categories count
-        cat_counts_query = db.query(
+        cat_counts_query = base_query.with_entities(
             Feedback.category,
             func.count(Feedback.id)
         ).filter(
@@ -177,7 +186,7 @@ class FeedbackService:
         category_counts = {row[0]: row[1] for row in cat_counts_query if row[0]}
 
         # Source count
-        source_counts_query = db.query(
+        source_counts_query = base_query.with_entities(
             Feedback.source,
             func.count(Feedback.id)
         ).filter(

@@ -1,0 +1,87 @@
+{
+  "scale_1000": {
+    "record_count": 1000,
+    "total_duration_sec": 0.12,
+    "parsing_validation_sec": 0.001,
+    "throughput_rps": 8604.6,
+    "peak_memory_mb": 4.35,
+    "db_size_before_mb": 676.91,
+    "db_size_after_mb": 676.91,
+    "db_size_increase_mb": 0.0,
+    "persisted_records": 1000,
+    "status": "COMPLETED",
+    "stage": "COMPLETED"
+  },
+  "scale_10000": {
+    "record_count": 10000,
+    "total_duration_sec": 0.72,
+    "parsing_validation_sec": 0.001,
+    "throughput_rps": 13899.7,
+    "peak_memory_mb": 7.81,
+    "db_size_before_mb": 676.91,
+    "db_size_after_mb": 676.91,
+    "db_size_increase_mb": 0.0,
+    "persisted_records": 10000,
+    "status": "COMPLETED",
+    "stage": "COMPLETED"
+  },
+  "scale_100000": {
+    "record_count": 100000,
+    "total_duration_sec": 6.41,
+    "parsing_validation_sec": 0.003,
+    "throughput_rps": 15598.4,
+    "peak_memory_mb": 7.9,
+    "db_size_before_mb": 676.91,
+    "db_size_after_mb": 721.01,
+    "db_size_increase_mb": 44.1,
+    "persisted_records": 100000,
+    "status": "COMPLETED",
+    "stage": "COMPLETED"
+  },
+  "scale_500000": {
+    "record_count": 500000,
+    "total_duration_sec": 30.78,
+    "parsing_validation_sec": 0.013,
+    "throughput_rps": 16244.2,
+    "peak_memory_mb": 7.93,
+    "db_size_before_mb": 721.01,
+    "db_size_after_mb": 999.97,
+    "db_size_increase_mb": 278.96,
+    "persisted_records": 500000,
+    "status": "COMPLETED",
+    "stage": "COMPLETED"
+  },
+  "scale_1048575": {
+    "record_count": 1048575,
+    "total_duration_sec": 67.21,
+    "parsing_validation_sec": 0.026,
+    "throughput_rps": 15602.2,
+    "peak_memory_mb": 7.94,
+    "db_size_before_mb": 999.97,
+    "db_size_after_mb": 1382.58,
+    "db_size_increase_mb": 382.61,
+    "persisted_records": 1048575,
+    "status": "COMPLETED",
+    "stage": "COMPLETED"
+  },
+  "scale_1050000": {
+    "record_count": 1050000,
+    "total_duration_sec": 65.34,
+    "parsing_validation_sec": 0.026,
+    "throughput_rps": 16068.6,
+    "peak_memory_mb": 7.95,
+    "db_size_before_mb": 1382.58,
+    "db_size_after_mb": 1383.62,
+    "db_size_increase_mb": 1.04,
+    "persisted_records": 1050000,
+    "status": "COMPLETED",
+    "stage": "COMPLETED"
+  },
+  "rollback_verification": {
+    "scale": 10000,
+    "feedback_leaked_rows": 0,
+    "staging_leaked_rows": 0,
+    "job_status": "FAILED",
+    "rollback_verified": true
+  }
+}

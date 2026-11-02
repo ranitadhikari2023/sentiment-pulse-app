@@ -1,0 +1,119 @@
+{
+  "concurrency_1": {
+    "concurrency_level": 1,
+    "jobs_executed": 1,
+    "rows_per_job": 250,
+    "total_records_processed": 250,
+    "total_wall_time_sec": 3.36,
+    "total_throughput_rps": 74.5,
+    "avg_per_job_throughput_rps": 74.8,
+    "cpu_utilization_pct": 1030.7,
+    "peak_rss_mb": 1733.35,
+    "private_bytes_mb": 2787.37,
+    "api_responsiveness": {
+      "probes_recorded": 61,
+      "avg_predict_latency_ms": 0.14,
+      "p95_predict_latency_ms": 0.12
+    },
+    "job_breakdown": [
+      {
+        "job_id": "10d63243-5c73-4f61-94a7-355ad1c03536",
+        "tenant_id": 100,
+        "status": "COMPLETED",
+        "total_rows": 250,
+        "successful_rows": 250,
+        "failed_rows": 0,
+        "elapsed_sec": 3.34,
+        "throughput_rps": 74.8
+      }
+    ]
+  },
+  "concurrency_2": {
+    "concurrency_level": 2,
+    "jobs_executed": 2,
+    "rows_per_job": 250,
+    "total_records_processed": 500,
+    "total_wall_time_sec": 6.27,
+    "total_throughput_rps": 79.8,
+    "avg_per_job_throughput_rps": 40.1,
+    "cpu_utilization_pct": 1303.5,
+    "peak_rss_mb": 2919.87,
+    "private_bytes_mb": 3848.72,
+    "api_responsiveness": {
+      "probes_recorded": 102,
+      "avg_predict_latency_ms": 0.11,
+      "p95_predict_latency_ms": 0.12
+    },
+    "job_breakdown": [
+      {
+        "job_id": "0cbb63fb-fa99-49ab-8f31-1b29652f4d0c",
+        "tenant_id": 100,
+        "status": "COMPLETED",
+        "total_rows": 250,
+        "successful_rows": 250,
+        "failed_rows": 0,
+        "elapsed_sec": 6.19,
+        "throughput_rps": 40.4
+      },
+      {
+        "job_id": "7fddd88d-b22d-4bc7-9955-1b51050fed3b",
+        "tenant_id": 101,
+        "status": "COMPLETED",
+        "total_rows": 250,
+        "successful_rows": 250,
+        "failed_rows": 0,
+        "elapsed_sec": 6.26,
+        "throughput_rps": 39.9
+      }
+    ]
+  },
+  "concurrency_3": {
+    "concurrency_level": 3,
+    "jobs_executed": 3,
+    "rows_per_job": 250,
+    "total_records_processed": 750,
+    "total_wall_time_sec": 9.34,
+    "total_throughput_rps": 80.3,
+    "avg_per_job_throughput_rps": 27.7,
+    "cpu_utilization_pct": 1338.4,
+    "peak_rss_mb": 3634.02,
+    "private_bytes_mb": 4909.84,
+    "api_responsiveness": {
+      "probes_recorded": 151,
+      "avg_predict_latency_ms": 0.09,
+      "p95_predict_latency_ms": 0.1
+    },
+    "job_breakdown": [
+      {
+        "job_id": "b73b839d-5865-495e-b188-27439ea42ae1",
+        "tenant_id": 100,
+        "status": "COMPLETED",
+        "total_rows": 250,
+        "successful_rows": 250,
+        "failed_rows": 0,
+        "elapsed_sec": 8.58,
+        "throughput_rps": 29.1
+      },
+      {
+        "job_id": "33bbf91d-118c-4bee-9aa6-1b76c7cea514",
+        "tenant_id": 101,
+        "status": "COMPLETED",
+        "total_rows": 250,
+        "successful_rows": 250,
+        "failed_rows": 0,
+        "elapsed_sec": 9.33,
+        "throughput_rps": 26.8
+      },
+      {
+        "job_id": "87eb3a86-9114-46fb-96be-d78d5dcca688",
+        "tenant_id": 102,
+        "status": "COMPLETED",
+        "total_rows": 250,
+        "successful_rows": 250,
+        "failed_rows": 0,
+        "elapsed_sec": 9.15,
+        "throughput_rps": 27.3
+      }
+    ]
+  }
+}

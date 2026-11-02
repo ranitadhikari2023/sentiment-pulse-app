@@ -6,17 +6,21 @@ No authentication required.
 
 import os
 import json
+import uuid
+import hashlib
 import tempfile
 from typing import Optional, Any
 from datetime import datetime, timezone
-from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, BackgroundTasks, Request
 from sqlalchemy.orm import Session
 
 from db.session import get_db
+from db.models import ImportJob
 from services.import_service import ImportService
 from schemas.import_job import ImportJobResponse
 from core.config import settings
 from core.logging import get_logger
+from core.security import resolve_trusted_tenant_identity
 
 logger = get_logger(__name__)
 
@@ -45,12 +49,37 @@ def _cleanup_temp_file(temp_file: Optional[Any], temp_path: Optional[str]) -> No
             logger.error(f"Failed to unlink temporary file {temp_path}: {unlink_err}")
 
 
-async def _upload_handler(file: UploadFile, db: Session, background_tasks: BackgroundTasks):
+async def _upload_handler(request: Request, file: UploadFile, db: Session, background_tasks: BackgroundTasks):
     temp_file = None
     temp_path = None
     ownership_transferred = False
 
     try:
+        # Resolve trusted tenant identity
+        user_id = resolve_trusted_tenant_identity(request)
+
+        # Enforce concurrent running imports limit (globally and per tenant)
+        max_concurrent = settings.MAX_CONCURRENT_IMPORT_JOBS
+        max_per_tenant = settings.MAX_CONCURRENT_PER_TENANT
+
+        if user_id is not None:
+            tenant_active = db.query(ImportJob).filter(
+                ImportJob.user_id == user_id,
+                ImportJob.status.in_(["PENDING", "PROCESSING"])
+            ).count()
+            if tenant_active >= max_per_tenant:
+                raise HTTPException(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail=f"Concurrent import limit reached for tenant ({tenant_active}/{max_per_tenant}). Please wait for active jobs to complete."
+                )
+
+        active_jobs = db.query(ImportJob).filter(ImportJob.status.in_(["PENDING", "PROCESSING"])).count()
+        if active_jobs >= max_concurrent:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=f"Concurrent import limit reached ({active_jobs}/{max_concurrent}). Please wait for active jobs to complete."
+            )
+
         # Verify file extension
         if not file.filename or not file.filename.lower().endswith(".csv"):
             raise HTTPException(
@@ -65,38 +94,61 @@ async def _upload_handler(file: UploadFile, db: Session, background_tasks: Backg
                 detail=f"Uploaded file exceeds maximum allowed size ({settings.MAX_IMPORT_FILE_SIZE_BYTES // (1024 * 1024)} MB). File exceeds the maximum permitted size of 100 MB."
             )
 
-        # Read content in bounded streaming chunks (64 KB) into temporary file on disk
+        # Read content in bounded streaming chunks (64 KB) into temporary/durable upload storage while computing SHA-256
         CHUNK_SIZE = 64 * 1024
         total_bytes = 0
-        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".csv")
+        os.makedirs(settings.UPLOAD_DIR, exist_ok=True)
+        job_id = str(uuid.uuid4())
+        hasher = hashlib.sha256()
+
+        temp_file = tempfile.NamedTemporaryFile(dir=settings.UPLOAD_DIR, delete=False, suffix=".csv")
         temp_path = temp_file.name
 
-        while True:
-            chunk = await file.read(CHUNK_SIZE)
-            if not chunk:
-                break
-            total_bytes += len(chunk)
-            if total_bytes > settings.MAX_IMPORT_FILE_SIZE_BYTES:
-                raise HTTPException(
-                    status_code=getattr(status, "HTTP_413_CONTENT_TOO_LARGE", 413),
-                    detail=f"Uploaded file exceeds maximum allowed size ({settings.MAX_IMPORT_FILE_SIZE_BYTES // (1024 * 1024)} MB). File exceeds the maximum permitted size of 100 MB."
-                )
-            temp_file.write(chunk)
-
-        temp_file.flush()
-        temp_file.close()
+        try:
+            while True:
+                chunk = await file.read(CHUNK_SIZE)
+                if not chunk:
+                    break
+                total_bytes += len(chunk)
+                if total_bytes > settings.MAX_IMPORT_FILE_SIZE_BYTES:
+                    _cleanup_temp_file(temp_file, temp_path)
+                    temp_file = None
+                    temp_path = None
+                    raise HTTPException(
+                        status_code=getattr(status, "HTTP_413_CONTENT_TOO_LARGE", 413),
+                        detail=f"Uploaded file exceeds maximum allowed size ({settings.MAX_IMPORT_FILE_SIZE_BYTES // (1024 * 1024)} MB). File exceeds the maximum permitted size of 100 MB."
+                    )
+                temp_file.write(chunk)
+                hasher.update(chunk)
+            temp_file.flush()
+        except Exception:
+            _cleanup_temp_file(temp_file, temp_path)
+            temp_file = None
+            temp_path = None
+            raise
 
         if total_bytes == 0:
+            _cleanup_temp_file(temp_file, temp_path)
+            temp_file = None
+            temp_path = None
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Uploaded CSV file is empty."
             )
 
+        # Close the file handle before passing to validator/worker (critical for Windows)
+        _cleanup_temp_file(temp_file, None)
+        temp_file = None
+        file_hash = hasher.hexdigest()
+
         # Validate CSV header structure quickly before scheduling background processing
         _, header_error = ImportService.validate_csv_header(temp_path)
         if header_error:
-            job = ImportService.create_import_job(db, file.filename)
+            job = ImportService.create_import_job(
+                db, file.filename, user_id=user_id, job_id=job_id, file_path=temp_path, file_hash=file_hash
+            )
             job.status = "FAILED"
+            job.stage = "FAILED"
             job.total_rows = 0
             job.successful_rows = 0
             job.failed_rows = 0
@@ -104,12 +156,16 @@ async def _upload_handler(file: UploadFile, db: Session, background_tasks: Backg
             job.completed_at = datetime.now(timezone.utc)
             db.commit()
             db.refresh(job)
+            _cleanup_temp_file(None, temp_path)
+            temp_path = None
             return job
 
-        # Create tracking job in PENDING state
-        job = ImportService.create_import_job(db, file.filename)
+        # Create tracking job in PENDING state with durable file path and SHA-256 fingerprint
+        job = ImportService.create_import_job(
+            db, file.filename, user_id=user_id, job_id=job_id, file_path=temp_path, file_hash=file_hash
+        )
 
-        # Transfer ownership of temporary file to background worker
+        # Transfer ownership of durable file to background worker
         background_tasks.add_task(
             ImportService.process_csv_file_background,
             job_id=job.id,
@@ -124,34 +180,82 @@ async def _upload_handler(file: UploadFile, db: Session, background_tasks: Backg
         except Exception as file_close_err:
             logger.warning(f"Error closing uploaded file: {file_close_err}")
 
-        if not ownership_transferred:
+        if not ownership_transferred and temp_path is not None:
             _cleanup_temp_file(temp_file, temp_path)
 
 
-def _status_handler(job_id: str, db: Session):
+def _status_handler(request: Request, job_id: str, db: Session):
     job = ImportService.get_import_job(db, job_id)
     if not job:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Import job '{job_id}' not found."
         )
+
+    # Multi-tenant isolation: verify ownership if job is associated with a specific user/tenant
+    user_id = resolve_trusted_tenant_identity(request)
+    if job.user_id is not None:
+        if user_id is None or user_id != job.user_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied: Import job belongs to another tenant."
+            )
+
     return job
+
+
+def _resume_handler(request: Request, job_id: str, background_tasks: BackgroundTasks, db: Session):
+    job = ImportService.get_import_job(db, job_id)
+    if not job:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Import job '{job_id}' not found."
+        )
+
+    # Multi-tenant isolation: verify ownership if job is associated with a specific user/tenant
+    user_id = resolve_trusted_tenant_identity(request)
+    if job.user_id is not None:
+        if user_id is None or user_id != job.user_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied: Import job belongs to another tenant."
+            )
+
+    try:
+        return ImportService.resume_import_job(db, job_id, background_tasks=background_tasks)
+    except ValueError as val_err:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(val_err)
+        )
 
 
 for r in (router, api_router):
     @r.post("", response_model=ImportJobResponse, status_code=status.HTTP_202_ACCEPTED)
     async def upload_csv_endpoint(
+        request: Request,
         background_tasks: BackgroundTasks,
         file: UploadFile = File(..., description="CSV file with feedback text"),
         db: Session = Depends(get_db)
     ):
         """Uploads and schedules a customer feedback CSV file for background ingestion."""
-        return await _upload_handler(file, db, background_tasks)
+        return await _upload_handler(request, file, db, background_tasks)
 
     @r.get("/{job_id}", response_model=ImportJobResponse)
     def get_job_status_endpoint(
+        request: Request,
         job_id: str,
         db: Session = Depends(get_db)
     ):
         """Retrieves import job status and progress."""
-        return _status_handler(job_id, db)
+        return _status_handler(request, job_id, db)
+
+    @r.post("/{job_id}/resume", response_model=ImportJobResponse, status_code=status.HTTP_202_ACCEPTED)
+    def resume_job_endpoint(
+        request: Request,
+        job_id: str,
+        background_tasks: BackgroundTasks,
+        db: Session = Depends(get_db)
+    ):
+        """Resumes an interrupted or paused customer feedback import job from its last checkpoint."""
+        return _resume_handler(request, job_id, background_tasks, db)

@@ -23,6 +23,8 @@ const ImportsController = {
   _isTerminal: false,
   _pollSequence: 0,
   _pollInFlight: false,
+  _ingestStartTime: null,
+  _ingestStartProcessed: 0,
 
   formatFileSize(bytes) {
     if (bytes === 0) return '0 B';
@@ -34,6 +36,18 @@ const ImportsController = {
 
   init() {
     this.bindEvents();
+    this.restoreActiveJob();
+  },
+
+  restoreActiveJob() {
+    try {
+      const savedJobId = localStorage.getItem('sentiment_pulse_active_import_job');
+      if (savedJobId) {
+        const statusCard = document.getElementById('import-status-card');
+        if (statusCard) statusCard.classList.remove('hidden');
+        this.pollJob(savedJobId);
+      }
+    } catch {}
   },
 
   cleanup() {
@@ -46,6 +60,12 @@ const ImportsController = {
     this._activeJobId = null;
     this._pollInFlight = false;
     this._lastProgressPct = 0;
+    this._ingestStartTime = null;
+    this._ingestStartProcessed = 0;
+
+    try {
+      localStorage.removeItem('sentiment_pulse_active_import_job');
+    } catch {}
 
     this.stopPollingPulse();
 
@@ -342,6 +362,10 @@ const ImportsController = {
     const progressPct = document.getElementById('import-progress-pct');
     const uploadBtn = document.getElementById('import-submit-btn');
 
+    try {
+      localStorage.setItem('sentiment_pulse_active_import_job', jobId);
+    } catch {}
+
     if (this.pollingInterval) {
       clearInterval(this.pollingInterval);
       this.pollingInterval = null;
@@ -402,21 +426,82 @@ const ImportsController = {
             progressText.textContent = 'Import queued in background. Waiting for worker...';
           }
           if (progressBar) {
-            progressBar.style.width = '25%';
+            progressBar.style.width = '15%';
             progressBar.classList.remove('animate-pulse');
           }
-          if (progressPct) progressPct.textContent = '25%';
+          if (progressPct) progressPct.textContent = '15%';
           return;
         }
 
         // 6. Non-terminal states: PROCESSING
         const processed = job.processed_rows || 0;
         const total = job.total_rows || 0;
+        const successful = job.successful_rows || 0;
+        const failed = job.failed_rows || 0;
+        const stage = job.stage || 'PROCESSING';
 
-        if (processed > 0) {
-          const pct = total > 0 ? Math.min(Math.round((processed / total) * 100), 95) : 50;
+        if (stage === 'FINALIZING') {
+          this._lastProgressPct = Math.max(98, this._lastProgressPct);
+          if (progressBar) {
+            progressBar.style.width = '98%';
+            progressBar.classList.add('animate-pulse');
+          }
+          if (progressPct) progressPct.textContent = '98%';
+          if (progressText) {
+            progressText.textContent = 'Finalizing batch and committing records to database...';
+          }
+          return;
+        }
+
+        if (stage === 'PARSING') {
+          this._lastProgressPct = Math.max(20, this._lastProgressPct);
+          if (progressBar) {
+            progressBar.style.width = '20%';
+            progressBar.classList.add('animate-pulse');
+          }
+          if (progressPct) progressPct.textContent = '20%';
+          if (progressText) {
+            progressText.textContent = 'Parsing CSV file structure and detecting delimiters...';
+          }
+          return;
+        }
+
+        if (stage === 'VALIDATING') {
+          this._lastProgressPct = Math.max(25, this._lastProgressPct);
+          if (progressBar) {
+            progressBar.style.width = '25%';
+            progressBar.classList.add('animate-pulse');
+          }
+          if (progressPct) progressPct.textContent = '25%';
+          if (progressText) {
+            progressText.textContent = 'Validating columns and calculating record boundaries...';
+          }
+          return;
+        }
+
+        if (processed > 0 && total > 0) {
+          const ratio = Math.min(processed / total, 1.0);
+          const pct = Math.min(25 + Math.round(ratio * 70), 96);
           const displayPct = Math.max(pct, this._lastProgressPct);
           this._lastProgressPct = displayPct;
+
+          if (!this._ingestStartTime) {
+            this._ingestStartTime = Date.now();
+            this._ingestStartProcessed = processed;
+          }
+          let etaStr = '';
+          const elapsedSec = (Date.now() - this._ingestStartTime) / 1000;
+          const processedDelta = processed - this._ingestStartProcessed;
+          if (elapsedSec > 2 && processedDelta > 0 && total > processed) {
+            const rps = processedDelta / elapsedSec;
+            const remaining = total - processed;
+            const etaSec = Math.round(remaining / Math.max(rps, 0.1));
+            if (etaSec > 60) {
+              etaStr = ` • ETA: ~${Math.floor(etaSec / 60)}m ${etaSec % 60}s`;
+            } else if (etaSec > 0) {
+              etaStr = ` • ETA: ~${etaSec}s`;
+            }
+          }
 
           if (progressBar) {
             progressBar.style.width = `${displayPct}%`;
@@ -424,23 +509,29 @@ const ImportsController = {
           }
           if (progressPct) progressPct.textContent = `${displayPct}%`;
           if (progressText) {
-            progressText.textContent = `Processing records (${processed.toLocaleString()} / ${total.toLocaleString()})...`;
+            progressText.textContent = `Processing ${processed.toLocaleString()} / ${total.toLocaleString()} records${etaStr} (Inserted: ${successful.toLocaleString()} | Rejected: ${failed.toLocaleString()})`;
           }
-        } else {
-          // Bounded atomic processing state: records are flushed without partial intermediate commits
-          const displayPct = Math.max(50, this._lastProgressPct);
+        } else if (total > 0) {
+          const displayPct = Math.max(25, this._lastProgressPct);
           this._lastProgressPct = displayPct;
-
           if (progressBar) {
             progressBar.style.width = `${displayPct}%`;
             progressBar.classList.add('animate-pulse');
           }
-          if (progressPct) progressPct.textContent = 'Processing...';
+          if (progressPct) progressPct.textContent = `${displayPct}%`;
           if (progressText) {
-            progressText.textContent =
-              total > 0
-                ? `Ingesting and analyzing batch (${total.toLocaleString()} records in atomic transaction)...`
-                : 'Validating and analyzing batch in background...';
+            progressText.textContent = `Preparing ingestion of ${total.toLocaleString()} records...`;
+          }
+        } else {
+          const displayPct = Math.max(20, this._lastProgressPct);
+          this._lastProgressPct = displayPct;
+          if (progressBar) {
+            progressBar.style.width = `${displayPct}%`;
+            progressBar.classList.add('animate-pulse');
+          }
+          if (progressPct) progressPct.textContent = `${displayPct}%`;
+          if (progressText) {
+            progressText.textContent = 'Analyzing and processing batch in background...';
           }
         }
       } catch (err) {
@@ -497,6 +588,9 @@ const ImportsController = {
 
   async renderJobSuccess(job) {
     this._isTerminal = true;
+    try {
+      localStorage.removeItem('sentiment_pulse_active_import_job');
+    } catch {}
     if (this.pollingInterval) {
       clearInterval(this.pollingInterval);
       this.pollingInterval = null;
@@ -504,6 +598,8 @@ const ImportsController = {
     this.stopPollingPulse();
     this.isUploading = false;
     this._lastProgressPct = 0;
+    this._ingestStartTime = null;
+    this._ingestStartProcessed = 0;
 
     const progressText = document.getElementById('import-progress-status');
     const progressBar = document.getElementById('import-progress-bar');
@@ -574,6 +670,9 @@ const ImportsController = {
 
   renderJobFailure(job) {
     this._isTerminal = true;
+    try {
+      localStorage.removeItem('sentiment_pulse_active_import_job');
+    } catch {}
     if (this.pollingInterval) {
       clearInterval(this.pollingInterval);
       this.pollingInterval = null;
@@ -581,6 +680,8 @@ const ImportsController = {
     this.stopPollingPulse();
     this.isUploading = false;
     this._lastProgressPct = 0;
+    this._ingestStartTime = null;
+    this._ingestStartProcessed = 0;
 
     const progressText = document.getElementById('import-progress-status');
     const progressBar = document.getElementById('import-progress-bar');

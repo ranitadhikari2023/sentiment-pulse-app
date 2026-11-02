@@ -10,11 +10,12 @@ import csv
 import uuid
 import json
 import tempfile
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import List, Dict, Any, Tuple, Optional
+from sqlalchemy import insert, select, delete, or_
 from sqlalchemy.orm import Session
 
-from db.models import Feedback, ImportJob
+from db.models import Feedback, ImportJob, FeedbackStaging
 from core.config import settings
 from core.logging import get_logger
 from services.sentiment_service import sentiment_service
@@ -117,16 +118,26 @@ def sanitize_csv_cell(value: Any) -> str:
 
 class ImportService:
     @staticmethod
-    def create_import_job(db: Session, filename: str) -> ImportJob:
+    def create_import_job(
+        db: Session,
+        filename: str,
+        user_id: Optional[int] = None,
+        job_id: Optional[str] = None,
+        file_path: Optional[str] = None,
+        file_hash: Optional[str] = None,
+    ) -> ImportJob:
         job = ImportJob(
-            id=str(uuid.uuid4()),
-            user_id=None,
+            id=job_id or str(uuid.uuid4()),
+            user_id=user_id,
             filename=filename,
+            file_path=file_path,
+            file_hash=file_hash,
             total_rows=0,
             processed_rows=0,
             successful_rows=0,
             failed_rows=0,
             status="PENDING",
+            stage="QUEUED",
             created_at=datetime.now(timezone.utc)
         )
         db.add(job)
@@ -138,6 +149,138 @@ class ImportService:
     def get_import_job(db: Session, job_id: str) -> Optional[ImportJob]:
         """Retrieval of import job by ID."""
         return db.query(ImportJob).filter(ImportJob.id == job_id).first()
+
+    @classmethod
+    def resume_import_job(cls, db: Session, job_id: str, background_tasks: Optional[Any] = None) -> ImportJob:
+        """
+        Resumes an interrupted or failed import job from its last checkpoint.
+        Validates source file persistence and cryptographic SHA-256 fingerprint.
+        """
+        job = db.query(ImportJob).filter(ImportJob.id == job_id).first()
+        if not job:
+            raise ValueError(f"ImportJob '{job_id}' not found.")
+
+        if job.status == "COMPLETED":
+            raise ValueError("Import job has already completed.")
+
+        if not job.file_path or not os.path.exists(job.file_path):
+            raise ValueError("Source CSV file no longer exists on disk; cannot resume.")
+
+        # Verify source file integrity if file_hash is registered
+        if job.file_hash:
+            import hashlib
+            with open(job.file_path, "rb") as f_chk:
+                computed_hash = hashlib.sha256(f_chk.read()).hexdigest()
+            if computed_hash != job.file_hash:
+                raise ValueError("Source CSV file integrity violation: content hash does not match original upload.")
+
+        job.status = "PENDING"
+        job.stage = "QUEUED"
+        job.error_summary = None
+        db.commit()
+        db.refresh(job)
+
+        if background_tasks is not None:
+            background_tasks.add_task(
+                cls.process_csv_file_background,
+                job_id=job.id,
+                file_path=job.file_path
+            )
+
+        return job
+
+    @classmethod
+    def recover_stale_finalization(cls, db: Session, job_id: str, lease_timeout_seconds: int = 300) -> Optional[ImportJob]:
+        """
+        Recovers an import job abandoned in FINALIZING state due to worker death (SIGKILL/crash).
+        Guarantees a single atomic transaction for transfer, staging deletion, and completion.
+        Prevents duplicate records and safely restores stalled jobs without destroying staged data.
+        """
+        stale_cutoff = datetime.now(timezone.utc) - timedelta(seconds=lease_timeout_seconds)
+
+        # CAS claim for recovery lease
+        claimed = db.query(ImportJob).filter(
+            ImportJob.id == job_id,
+            ImportJob.stage == "FINALIZING",
+            ImportJob.status != "COMPLETED",
+            or_(
+                ImportJob.updated_at < stale_cutoff,
+                ImportJob.updated_at.is_(None)
+            )
+        ).update({
+            "stage": "FINALIZING",
+            "updated_at": datetime.now(timezone.utc)
+        }, synchronize_session=False)
+
+        if claimed == 0:
+            logger.info(f"Job {job_id} is not in a recoverable stale FINALIZING state.")
+            return None
+
+        db.commit()
+        job = db.query(ImportJob).filter(ImportJob.id == job_id).first()
+        if not job:
+            return None
+
+        # Execute atomic finalization transfer in a single transaction
+        try:
+            staged_count = db.query(FeedbackStaging).filter(FeedbackStaging.import_job_id == job.id).count()
+            if staged_count > 0:
+                transfer_stmt = insert(Feedback).from_select(
+                    [
+                        Feedback.user_id,
+                        Feedback.text,
+                        Feedback.clean_text,
+                        Feedback.sentiment,
+                        Feedback.confidence,
+                        Feedback.positive_score,
+                        Feedback.neutral_score,
+                        Feedback.negative_score,
+                        Feedback.category,
+                        Feedback.source,
+                        Feedback.rating,
+                        Feedback.model_version,
+                        Feedback.created_at,
+                        Feedback.updated_at,
+                    ],
+                    select(
+                        FeedbackStaging.user_id,
+                        FeedbackStaging.text,
+                        FeedbackStaging.clean_text,
+                        FeedbackStaging.sentiment,
+                        FeedbackStaging.confidence,
+                        FeedbackStaging.positive_score,
+                        FeedbackStaging.neutral_score,
+                        FeedbackStaging.negative_score,
+                        FeedbackStaging.category,
+                        FeedbackStaging.source,
+                        FeedbackStaging.rating,
+                        FeedbackStaging.model_version,
+                        FeedbackStaging.created_at,
+                        FeedbackStaging.updated_at,
+                    ).where(FeedbackStaging.import_job_id == job.id)
+                )
+                db.execute(transfer_stmt)
+                db.execute(delete(FeedbackStaging).where(FeedbackStaging.import_job_id == job.id))
+
+            job.status = "COMPLETED"
+            job.stage = "COMPLETED"
+            job.completed_at = datetime.now(timezone.utc)
+            job.updated_at = datetime.now(timezone.utc)
+            db.commit()
+            db.refresh(job)
+            logger.info(f"Successfully recovered and finalized stale ImportJob {job_id}.")
+            return job
+        except Exception as exc:
+            db.rollback()
+            logger.error(f"Failed to recover finalization for job {job_id}: {exc}", exc_info=True)
+            db.query(ImportJob).filter(ImportJob.id == job_id).update({
+                "stage": "FAILED",
+                "status": "FAILED",
+                "updated_at": datetime.now(timezone.utc),
+                "error_summary": json.dumps([f"Finalization recovery failed: {str(exc)}"])
+            }, synchronize_session=False)
+            db.commit()
+            return job
 
     @staticmethod
     def normalize_header(header: Any) -> str:
@@ -374,6 +517,20 @@ class ImportService:
 
         db = SessionLocal()
         try:
+            # Atomic Compare-And-Swap (CAS) to claim the job and prevent concurrent dual-execution
+            rows_claimed = db.query(ImportJob).filter(
+                ImportJob.id == job_id,
+                ImportJob.status == "PENDING"
+            ).update({
+                "status": "PROCESSING",
+                "stage": "PARSING"
+            })
+            db.commit()
+
+            if rows_claimed == 0:
+                logger.warning(f"Background task: ImportJob '{job_id}' is already claimed or completed by another worker. Skipping redundant execution.")
+                return
+
             job = db.query(ImportJob).filter(ImportJob.id == job_id).first()
             if not job:
                 logger.error(f"Background task: ImportJob '{job_id}' not found.")
@@ -402,12 +559,33 @@ class ImportService:
             except Exception:
                 pass
 
-            # Guarantees deletion of the temporary file once processing completes or fails
-            if os.path.exists(file_path):
-                try:
-                    os.unlink(file_path)
-                except OSError as unlink_err:
-                    logger.error(f"Background task failed to unlink temporary file {file_path}: {unlink_err}")
+            # If durable in UPLOAD_DIR, only unlink when COMPLETED (preserve for resumption on failure/interruption).
+            # If temporary file outside UPLOAD_DIR, always unlink on completion or failure.
+            is_durable = False
+            try:
+                upload_dir_abs = os.path.abspath(settings.UPLOAD_DIR)
+                file_path_abs = os.path.abspath(file_path)
+                common = os.path.commonpath([upload_dir_abs, file_path_abs])
+                is_durable = (common == upload_dir_abs)
+            except Exception:
+                is_durable = False
+
+            try:
+                with SessionLocal() as check_db:
+                    final_job = check_db.query(ImportJob).filter(ImportJob.id == job_id).first()
+                    should_unlink = False
+                    if not is_durable:
+                        should_unlink = True
+                    elif final_job and final_job.status == "COMPLETED":
+                        should_unlink = True
+
+                    if should_unlink and os.path.exists(file_path):
+                        try:
+                            os.unlink(file_path)
+                        except OSError as unlink_err:
+                            logger.error(f"Background task failed to unlink file {file_path}: {unlink_err}")
+            except Exception:
+                pass
 
     @classmethod
     def process_csv_bytes(cls, db: Session, job: ImportJob, content: bytes) -> ImportJob:
@@ -432,22 +610,44 @@ class ImportService:
     def process_csv_file(cls, db: Session, job: ImportJob, file_path: str) -> ImportJob:
         """
         Parses and processes CSV from file in bounded chunks, streaming rows to avoid
-        unbounded memory usage, creating Feedback records within an atomic transaction.
-        All records are flushed in chunks to keep memory bounded, and committed atomically
-        at the end. On any transaction failure, all inserted records are rolled back.
+        unbounded memory usage, creating records within an isolated staging table.
+        Chunks are committed to staging as they process, giving real-time visibility
+        into progress without exposing unfinalized records to regular queries.
+        On completion, records are atomically transferred to the primary Feedback table.
+        On any transaction failure, all staged records for the job are purged completely.
         """
+        if job.status in ("COMPLETED", "FAILED"):
+            logger.info(f"ImportJob {job.id} already in terminal state {job.status}. Skipping processing.")
+            return job
+
+        # Verify source file integrity if file_hash is registered
+        if job.file_hash and os.path.exists(file_path):
+            import hashlib
+            with open(file_path, "rb") as f_chk:
+                computed_hash = hashlib.sha256(f_chk.read()).hexdigest()
+            if computed_hash != job.file_hash:
+                job.status = "FAILED"
+                job.stage = "FAILED"
+                job.error_summary = json.dumps(["Source file integrity violation: content hash does not match original upload."])
+                job.completed_at = datetime.now(timezone.utc)
+                db.commit()
+                return job
+
         try:
             job.status = "PROCESSING"
+            job.stage = "PARSING"
             db.commit()
 
             # Attempt decoding with fallback strategies
             encoding = cls._detect_file_encoding(file_path)
             if encoding is None:
+                db.execute(delete(FeedbackStaging).where(FeedbackStaging.import_job_id == job.id))
                 job.total_rows = 0
                 job.processed_rows = 0
                 job.successful_rows = 0
                 job.failed_rows = 0
                 job.status = "FAILED"
+                job.stage = "FAILED"
                 job.error_summary = json.dumps(["CSV encoding is not supported. Please use UTF-8, UTF-8 BOM, or Latin-1."])
                 job.completed_at = datetime.now(timezone.utc)
                 db.commit()
@@ -464,11 +664,13 @@ class ImportService:
                         break
 
                 if header_row is None:
+                    db.execute(delete(FeedbackStaging).where(FeedbackStaging.import_job_id == job.id))
                     job.total_rows = 0
                     job.processed_rows = 0
                     job.successful_rows = 0
                     job.failed_rows = 0
                     job.status = "FAILED"
+                    job.stage = "FAILED"
                     job.error_summary = json.dumps(["CSV file is completely empty."])
                     job.completed_at = datetime.now(timezone.utc)
                     db.commit()
@@ -477,15 +679,20 @@ class ImportService:
                 text_col_idx, category_idx, source_idx, rating_idx, _ = cls.map_header_row(header_row)
 
                 if text_col_idx is None:
+                    db.execute(delete(FeedbackStaging).where(FeedbackStaging.import_job_id == job.id))
                     job.total_rows = 0
                     job.processed_rows = 0
                     job.successful_rows = 0
                     job.failed_rows = 0
                     job.status = "FAILED"
+                    job.stage = "FAILED"
                     job.error_summary = json.dumps(["CSV header must contain a 'text', 'review', or 'feedback' column."])
                     job.completed_at = datetime.now(timezone.utc)
                     db.commit()
                     return job
+
+                job.stage = "VALIDATING"
+                db.commit()
 
                 # Count non-empty data rows in a streaming pass to bound memory while calculating exact count
                 total_data_rows = 0
@@ -494,11 +701,13 @@ class ImportService:
                         total_data_rows += 1
 
                 if total_data_rows > settings.MAX_IMPORT_ROWS:
+                    db.execute(delete(FeedbackStaging).where(FeedbackStaging.import_job_id == job.id))
                     job.total_rows = total_data_rows
                     job.processed_rows = 0
                     job.successful_rows = 0
                     job.failed_rows = 0
                     job.status = "FAILED"
+                    job.stage = "FAILED"
                     job.error_summary = json.dumps([
                         f"CSV exceeds maximum allowed rows ({total_data_rows} > {settings.MAX_IMPORT_ROWS}). Maximum batch limit is {settings.MAX_IMPORT_ROWS_FORMATTED} records."
                     ])
@@ -507,17 +716,20 @@ class ImportService:
                     return job
 
                 if total_data_rows == 0:
+                    db.execute(delete(FeedbackStaging).where(FeedbackStaging.import_job_id == job.id))
                     job.total_rows = 0
                     job.processed_rows = 0
                     job.successful_rows = 0
                     job.failed_rows = 0
                     job.status = "FAILED"
+                    job.stage = "FAILED"
                     job.error_summary = json.dumps(["CSV file contains no data rows."])
                     job.completed_at = datetime.now(timezone.utc)
                     db.commit()
                     return job
 
                 job.total_rows = total_data_rows
+                job.stage = "INSERTING"
                 db.commit()
 
                 # Rewind file to start of rows for bounded chunk processing
@@ -529,14 +741,36 @@ class ImportService:
                     if row and any(cell.strip() for cell in row):
                         break
 
+                # Check for durable chunk checkpoints from interrupted or resumed jobs
+                staged_existing = db.query(FeedbackStaging).filter(FeedbackStaging.import_job_id == job.id).count()
+                resume_skip_rows = 0
+                if job.processed_rows > 0 and staged_existing > 0:
+                    resume_skip_rows = job.processed_rows
+                    logger.info(
+                        f"Resuming ImportJob '{job.id}' checkpoint: {resume_skip_rows} rows already processed, "
+                        f"{staged_existing} records in staging."
+                    )
+                else:
+                    resume_skip_rows = 0
+                    job.processed_rows = 0
+                    job.successful_rows = 0
+                    job.failed_rows = 0
+                    job.last_checkpoint_row = 0
+
                 chunk_size = getattr(settings, "DB_INSERT_CHUNK_SIZE", settings.IMPORT_CHUNK_SIZE)
                 errors: List[str] = []
                 current_chunk: List[List[str]] = []
-                processed_so_far = 0
+                processed_so_far = resume_skip_rows
+                skipped_resumed = 0
 
                 for row in reader:
                     # Skip empty rows safely
                     if not row or not any(cell.strip() for cell in row):
+                        continue
+
+                    # Skip previously processed and committed rows when resuming
+                    if skipped_resumed < resume_skip_rows:
+                        skipped_resumed += 1
                         continue
 
                     current_chunk.append(row)
@@ -554,6 +788,7 @@ class ImportService:
                         )
                         processed_so_far += len(current_chunk)
                         current_chunk = []
+                        db.commit()
 
                 if current_chunk:
                     cls._process_row_chunk(
@@ -568,22 +803,103 @@ class ImportService:
                         errors=errors
                     )
                     processed_so_far += len(current_chunk)
+                    db.commit()
 
+                # Finalization Phase
+                # Atomic CAS claim for finalization with lease expiration to prevent duplicate concurrent finalizations
+                FINALIZATION_LEASE_SECONDS = 300
+                stale_cutoff = datetime.now(timezone.utc) - timedelta(seconds=FINALIZATION_LEASE_SECONDS)
+                finalizing_claimed = db.query(ImportJob).filter(
+                    ImportJob.id == job.id,
+                    ImportJob.status != "COMPLETED",
+                    or_(
+                        ImportJob.stage != "FINALIZING",
+                        ImportJob.updated_at < stale_cutoff,
+                        ImportJob.updated_at.is_(None)
+                    )
+                ).update({
+                    "stage": "FINALIZING",
+                    "updated_at": datetime.now(timezone.utc)
+                }, synchronize_session=False)
+                if finalizing_claimed == 0:
+                    logger.info(f"ImportJob {job.id} already finalized or in active finalization by another worker. Skipping duplicate finalization.")
+                    return job
+                db.commit()
+
+                # Atomic transfer from staging to feedback table
+                staged_count = db.query(FeedbackStaging).filter(FeedbackStaging.import_job_id == job.id).count()
+                if staged_count > 0:
+                    transfer_stmt = insert(Feedback).from_select(
+                        [
+                            Feedback.user_id,
+                            Feedback.text,
+                            Feedback.clean_text,
+                            Feedback.sentiment,
+                            Feedback.confidence,
+                            Feedback.positive_score,
+                            Feedback.neutral_score,
+                            Feedback.negative_score,
+                            Feedback.category,
+                            Feedback.source,
+                            Feedback.rating,
+                            Feedback.model_version,
+                            Feedback.created_at,
+                            Feedback.updated_at,
+                        ],
+                        select(
+                            FeedbackStaging.user_id,
+                            FeedbackStaging.text,
+                            FeedbackStaging.clean_text,
+                            FeedbackStaging.sentiment,
+                            FeedbackStaging.confidence,
+                            FeedbackStaging.positive_score,
+                            FeedbackStaging.neutral_score,
+                            FeedbackStaging.negative_score,
+                            FeedbackStaging.category,
+                            FeedbackStaging.source,
+                            FeedbackStaging.rating,
+                            FeedbackStaging.model_version,
+                            FeedbackStaging.created_at,
+                            FeedbackStaging.updated_at,
+                        ).where(FeedbackStaging.import_job_id == job.id)
+                    )
+                    db.execute(transfer_stmt)
+                    db.execute(delete(FeedbackStaging).where(FeedbackStaging.import_job_id == job.id))
+
+                # Keep job.stage as FINALIZING so finalization commit failures are caught
                 job.status = "COMPLETED" if job.failed_rows < job.total_rows else "FAILED"
+                job.stage = "FINALIZING"
                 if errors:
                     job.error_summary = json.dumps(errors[:50])  # Cap at 50 errors in summary
                 job.completed_at = datetime.now(timezone.utc)
+                job.updated_at = datetime.now(timezone.utc)
                 db.commit()
+                # Once atomic transfer commits successfully, mark stage COMPLETED
+                final_stage = "COMPLETED" if job.status == "COMPLETED" else "FAILED"
+                db.query(ImportJob).filter(ImportJob.id == job.id).update({
+                    "stage": final_stage
+                }, synchronize_session=False)
+                db.commit()
+                job.stage = final_stage
                 db.refresh(job)
+
+                # Clean up durable file if successfully completed
+                if job.status == "COMPLETED" and os.path.exists(file_path):
+                    try:
+                        os.unlink(file_path)
+                    except OSError:
+                        pass
                 return job
 
         except csv.Error as csv_err:
             logger.error(f"CSV parsing error in job {job.id}: {csv_err}")
             db.rollback()
             try:
+                db.execute(delete(FeedbackStaging).where(FeedbackStaging.import_job_id == job.id))
                 failed_job = db.query(ImportJob).filter(ImportJob.id == job.id).first()
                 if failed_job:
                     failed_job.status = "FAILED"
+                    failed_job.stage = "FAILED"
                     failed_job.successful_rows = 0
                     failed_job.failed_rows = failed_job.total_rows or job.total_rows
                     failed_job.error_summary = json.dumps([
@@ -596,6 +912,7 @@ class ImportService:
             except Exception:
                 pass
             job.status = "FAILED"
+            job.stage = "FAILED"
             job.successful_rows = 0
             job.failed_rows = job.total_rows
             job.error_summary = json.dumps([f"CSV parsing error: field exceeds maximum allowed size (1 MB) or malformed quotes ({str(csv_err)}). CSV parsing failed. Please check the file format and quoting."])
@@ -605,12 +922,30 @@ class ImportService:
             logger.error(f"Error processing import job {job.id}: {exc}", exc_info=True)
             db.rollback()
             try:
+                # Durable resumable imports in UPLOAD_DIR before finalization preserve staging records.
+                # Ephemeral temp files or failures during finalization purge staging.
+                is_durable_upload = (
+                    file_path is not None
+                    and os.path.exists(file_path)
+                    and bool(job.file_hash)
+                    and os.path.abspath(file_path).startswith(os.path.abspath(settings.UPLOAD_DIR))
+                    and job.stage != "FINALIZING"
+                )
+
+                job.stage = "INTERRUPTED" if is_durable_upload else "FAILED"
+                job.status = "FAILED"
+                if not is_durable_upload:
+                    db.execute(delete(FeedbackStaging).where(FeedbackStaging.import_job_id == job.id))
+
                 failed_job = db.query(ImportJob).filter(ImportJob.id == job.id).first()
                 if failed_job:
                     failed_job.status = "FAILED"
-                    # Atomic rollback policy: 0 records persisted when transaction fails
+                    failed_job.stage = job.stage
+                    # Atomic rollback policy: 0 finalized records in primary Feedback table
                     failed_job.successful_rows = 0
                     failed_job.failed_rows = failed_job.total_rows or job.total_rows
+                    # Preserve checkpoint row and staging records for resumption if durable
+                    failed_job.last_checkpoint_row = failed_job.processed_rows
                     failed_job.error_summary = json.dumps([
                         f"Database transaction failure, import rolled back completely: {str(exc)}"
                     ])
@@ -621,8 +956,7 @@ class ImportService:
             except Exception:
                 pass
             job.status = "FAILED"
-            job.successful_rows = 0
-            job.failed_rows = job.total_rows
+            job.stage = "FAILED"
             job.error_summary = json.dumps([f"Import processing failed: {str(exc)}"])
             return job
 
@@ -666,8 +1000,9 @@ class ImportService:
                 continue
         return None
 
-    @staticmethod
+    @classmethod
     def _process_row_chunk(
+        cls,
         db: Session,
         job: ImportJob,
         chunk: List[List[str]],
@@ -678,7 +1013,7 @@ class ImportService:
         rating_idx: Optional[int],
         errors: List[str],
     ) -> None:
-        new_records: List[Feedback] = []
+        valid_items: List[Tuple[int, str, Optional[str], Optional[str], Optional[int]]] = []
 
         for offset, row in enumerate(chunk):
             row_idx = start_row_idx + offset
@@ -727,47 +1062,69 @@ class ImportService:
                 except ValueError:
                     pass
 
+            valid_items.append((row_idx, raw_text, cat_val, src_val, rating_val))
+
+        new_records: List[Dict[str, Any]] = []
+
+        if valid_items:
+            texts = [item[1] for item in valid_items]
             try:
-                pred = sentiment_service.predict(raw_text)
+                preds = sentiment_service.predict_batch(texts)
+            except Exception:
+                # Fallback to single-item predict if batch inference fails
+                preds = []
+                for t in texts:
+                    try:
+                        preds.append(sentiment_service.predict(t))
+                    except Exception as e:
+                        preds.append(e)
+
+            now_utc = datetime.now(timezone.utc)
+            for (row_idx, raw_text, cat_val, src_val, rating_val), pred in zip(valid_items, preds):
+                if isinstance(pred, Exception) or pred is None:
+                    err_msg = str(pred) if pred else "Inference failed"
+                    if len(errors) < 100:
+                        errors.append(f"Row {row_idx}: Inference failed - {err_msg}")
+                    job.failed_rows += 1
+                    continue
+
                 scores = pred.get("scores", {})
-                fb = Feedback(
-                    user_id=None,
-                    text=raw_text,
-                    clean_text=pred.get("text", raw_text),
-                    sentiment=pred.get("sentiment", "unknown"),
-                    confidence=float(pred.get("confidence", 0.0)),
-                    positive_score=float(scores.get("positive", 0.0)),
-                    neutral_score=float(scores.get("neutral", 0.0)),
-                    negative_score=float(scores.get("negative", 0.0)),
-                    category=cat_val[:50] if cat_val else None,
-                    source=src_val[:50] if src_val else "csv_import",
-                    rating=rating_val,
-                    model_version="3.0.0",
-                    created_at=datetime.now(timezone.utc),
-                    updated_at=datetime.now(timezone.utc),
-                )
-                new_records.append(fb)
+                new_records.append({
+                    "import_job_id": job.id,
+                    "user_id": job.user_id,
+                    "row_number": row_idx,
+                    "text": raw_text,
+                    "clean_text": pred.get("text", raw_text),
+                    "sentiment": pred.get("sentiment", "unknown"),
+                    "confidence": float(pred.get("confidence", 0.0)),
+                    "positive_score": float(scores.get("positive", 0.0)),
+                    "neutral_score": float(scores.get("neutral", 0.0)),
+                    "negative_score": float(scores.get("negative", 0.0)),
+                    "category": cat_val[:50] if cat_val else None,
+                    "source": src_val[:50] if src_val else "csv_import",
+                    "rating": rating_val,
+                    "model_version": "3.0.0",
+                    "created_at": now_utc,
+                    "updated_at": now_utc,
+                })
                 job.successful_rows += 1
-            except Exception as e:
-                if len(errors) < 100:
-                    errors.append(f"Row {row_idx}: Inference failed - {str(e)}")
-                job.failed_rows += 1
 
         if new_records:
-            db.add_all(new_records)
+            db.execute(insert(FeedbackStaging), new_records)
             db.flush()
-            # Bounded memory: expunge persisted Feedback records from session identity map
-            for fb in new_records:
-                db.expunge(fb)
 
         job.processed_rows += len(chunk)
+        job.last_checkpoint_row = job.processed_rows
 
     @staticmethod
-    def generate_csv_export(db: Session) -> str:
+    def generate_csv_export(db: Session, user_id: Optional[int] = None) -> str:
         """
         Generates CSV string of all feedback records with formula injection protection.
         """
-        records = db.query(Feedback).order_by(Feedback.created_at.desc()).all()
+        query = db.query(Feedback)
+        if user_id is not None:
+            query = query.filter(Feedback.user_id == user_id)
+        records = query.order_by(Feedback.created_at.desc()).all()
         output = io.StringIO()
         writer = csv.writer(output)
 

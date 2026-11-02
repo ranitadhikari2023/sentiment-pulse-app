@@ -76,10 +76,52 @@ class ImportJob(Base):
     failed_rows = Column(Integer, default=0, nullable=False)
 
     status = Column(String(20), default="PENDING", nullable=False, index=True)  # PENDING, PROCESSING, COMPLETED, FAILED
+    stage = Column(String(50), default="QUEUED", nullable=False, index=True)  # QUEUED, PARSING, VALIDATING, INSERTING, FINALIZING, COMPLETED, FAILED
     error_summary = Column(Text, nullable=True)  # JSON serialized list of errors
 
+    # Checkpoint and durable upload fields
+    file_path = Column(String(512), nullable=True)
+    file_hash = Column(String(64), nullable=True)  # SHA-256 fingerprint of source upload
+    last_checkpoint_row = Column(Integer, default=0, nullable=False)
+
     created_at = Column(DateTime(timezone=True), default=utc_now, nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=True)
     completed_at = Column(DateTime(timezone=True), nullable=True)
 
     def __repr__(self):
-        return f"<ImportJob(id='{self.id}', status='{self.status}', progress={self.processed_rows}/{self.total_rows})>"
+        return f"<ImportJob(id='{self.id}', status='{self.status}', stage='{self.stage}', progress={self.processed_rows}/{self.total_rows})>"
+
+
+class FeedbackStaging(Base):
+    """
+    Isolated staging table for batch CSV ingestion.
+    Allows bounded chunk commits and progress visibility while keeping
+    incomplete imports completely invisible to normal feedback queries.
+    Atomic finalization transfers staged records into the primary feedback table.
+    """
+    __tablename__ = "feedback_staging"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    import_job_id = Column(String(36), nullable=False, index=True)
+    user_id = Column(Integer, nullable=True, index=True)
+    row_number = Column(Integer, nullable=True, index=True)
+
+    text = Column(Text, nullable=False)
+    clean_text = Column(Text, nullable=True)
+
+    sentiment = Column(String(20), nullable=False)
+    confidence = Column(Float, nullable=False)
+    positive_score = Column(Float, nullable=False, default=0.0)
+    neutral_score = Column(Float, nullable=False, default=0.0)
+    negative_score = Column(Float, nullable=False, default=0.0)
+
+    category = Column(String(50), nullable=True)
+    source = Column(String(50), nullable=True)
+    rating = Column(Integer, nullable=True)
+    model_version = Column(String(30), nullable=False, default="3.0.0")
+
+    created_at = Column(DateTime(timezone=True), default=utc_now, nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=utc_now, nullable=False)
+
+    def __repr__(self):
+        return f"<FeedbackStaging(job={self.import_job_id}, sentiment='{self.sentiment}')>"

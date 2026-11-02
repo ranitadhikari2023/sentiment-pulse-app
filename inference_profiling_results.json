@@ -1,0 +1,72 @@
+{
+  "batch_8": {
+    "batch_size": 8,
+    "evaluated_records": 1024,
+    "throughput_rps": 28.5,
+    "avg_batch_latency_ms": 280.39,
+    "p50_latency_ms": 277.53,
+    "p95_latency_ms": 349.32,
+    "avg_tokenization_ms": 1.379,
+    "avg_onnx_execution_ms": 278.72,
+    "avg_postprocessing_ms": 0.094,
+    "cpu_utilization_pct": 785.7,
+    "peak_rss_mb": 401.49,
+    "private_bytes_mb": 914.44
+  },
+  "batch_16": {
+    "batch_size": 16,
+    "evaluated_records": 1024,
+    "throughput_rps": 26.4,
+    "avg_batch_latency_ms": 605.04,
+    "p50_latency_ms": 600.8,
+    "p95_latency_ms": 666.55,
+    "avg_tokenization_ms": 2.034,
+    "avg_onnx_execution_ms": 602.53,
+    "avg_postprocessing_ms": 0.095,
+    "cpu_utilization_pct": 790.8,
+    "peak_rss_mb": 551.1,
+    "private_bytes_mb": 1182.63
+  },
+  "batch_32": {
+    "batch_size": 32,
+    "evaluated_records": 1024,
+    "throughput_rps": 26.9,
+    "avg_batch_latency_ms": 1191.2,
+    "p50_latency_ms": 1189.17,
+    "p95_latency_ms": 1235.16,
+    "avg_tokenization_ms": 2.862,
+    "avg_onnx_execution_ms": 1187.49,
+    "avg_postprocessing_ms": 0.102,
+    "cpu_utilization_pct": 794.9,
+    "peak_rss_mb": 800.5,
+    "private_bytes_mb": 1714.4
+  },
+  "batch_64": {
+    "batch_size": 64,
+    "evaluated_records": 1024,
+    "throughput_rps": 27.4,
+    "avg_batch_latency_ms": 2338.32,
+    "p50_latency_ms": 2325.72,
+    "p95_latency_ms": 2416.97,
+    "avg_tokenization_ms": 4.551,
+    "avg_onnx_execution_ms": 2332.27,
+    "avg_postprocessing_ms": 0.1,
+    "cpu_utilization_pct": 794.8,
+    "peak_rss_mb": 1406.05,
+    "private_bytes_mb": 2777.11
+  },
+  "batch_128": {
+    "batch_size": 128,
+    "evaluated_records": 1024,
+    "throughput_rps": 27.3,
+    "avg_batch_latency_ms": 4686.28,
+    "p50_latency_ms": 4650.18,
+    "p95_latency_ms": 4875.42,
+    "avg_tokenization_ms": 8.075,
+    "avg_onnx_execution_ms": 4675.39,
+    "avg_postprocessing_ms": 0.123,
+    "cpu_utilization_pct": 793.6,
+    "peak_rss_mb": 2451.11,
+    "private_bytes_mb": 3840.28
+  }
+}

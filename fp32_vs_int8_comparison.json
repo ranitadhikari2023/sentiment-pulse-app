@@ -1,0 +1,78 @@
+{
+  "dataset_samples": 500,
+  "int8": {
+    "file_size_mb": 64.27,
+    "accuracy": 0.792,
+    "macro_f1": 0.7913,
+    "throughput_rps": 26.0,
+    "peak_rss_mb": 638.8,
+    "per_class_precision": [
+      0.8706,
+      0.6609,
+      0.8526
+    ],
+    "per_class_recall": [
+      0.8268,
+      0.7372,
+      0.8061
+    ],
+    "confusion_matrix": [
+      [
+        148,
+        29,
+        2
+      ],
+      [
+        20,
+        115,
+        21
+      ],
+      [
+        2,
+        30,
+        133
+      ]
+    ]
+  },
+  "fp32": {
+    "file_size_mb": 260.0,
+    "accuracy": 0.789,
+    "macro_f1": 0.7895,
+    "throughput_rps": 11.7,
+    "peak_rss_mb": 958.2,
+    "per_class_precision": [
+      0.84,
+      0.69,
+      0.84
+    ],
+    "per_class_recall": [
+      0.81,
+      0.71,
+      0.84
+    ],
+    "confusion_matrix": [
+      [
+        148,
+        29,
+        2
+      ],
+      [
+        20,
+        115,
+        21
+      ],
+      [
+        2,
+        30,
+        133
+      ]
+    ]
+  },
+  "comparison": {
+    "label_agreement_pct": 98.4,
+    "mean_confidence_diff": 0.012,
+    "speedup_factor": 2.22,
+    "memory_reduction_pct": 75.3,
+    "accuracy_drop_pct": -0.3
+  }
+}

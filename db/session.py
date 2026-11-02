@@ -3,7 +3,7 @@ Database session management, connection pooling, and lifecycle dependencies for 
 """
 
 from typing import Generator
-from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import create_engine, inspect, text, event
 from sqlalchemy.orm import sessionmaker, Session
 
 from core.config import settings
@@ -28,6 +28,15 @@ else:
     engine_kwargs["pool_recycle"] = settings.DB_POOL_RECYCLE
 
 engine = create_engine(settings.DATABASE_URL, **engine_kwargs)
+
+@event.listens_for(engine, "connect")
+def _set_sqlite_pragma(dbapi_connection, connection_record):
+    if is_sqlite:
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA synchronous=NORMAL")
+        cursor.execute("PRAGMA busy_timeout=60000")
+        cursor.close()
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
@@ -56,7 +65,58 @@ def _migrate_schema() -> None:
     try:
         inspector = inspect(engine)
         tables = inspector.get_table_names()
-        latest_revision = "d5f3a1829e01"
+        latest_revision = "e6a1b2c3d4e5"
+
+        # Check and add 'stage', 'file_path', 'file_hash', 'last_checkpoint_row' to import_jobs if missing
+        if "import_jobs" in tables:
+            columns = [c["name"] for c in inspector.get_columns("import_jobs")]
+            if "stage" not in columns:
+                logger.info("Migrating schema: adding 'stage' column to import_jobs table...")
+                with engine.begin() as conn:
+                    conn.execute(text("ALTER TABLE import_jobs ADD COLUMN stage VARCHAR(50) DEFAULT 'QUEUED' NOT NULL"))
+            if "file_path" not in columns:
+                with engine.begin() as conn:
+                    conn.execute(text("ALTER TABLE import_jobs ADD COLUMN file_path VARCHAR(512)"))
+            if "file_hash" not in columns:
+                with engine.begin() as conn:
+                    conn.execute(text("ALTER TABLE import_jobs ADD COLUMN file_hash VARCHAR(64)"))
+            if "last_checkpoint_row" not in columns:
+                with engine.begin() as conn:
+                    conn.execute(text("ALTER TABLE import_jobs ADD COLUMN last_checkpoint_row INTEGER DEFAULT 0 NOT NULL"))
+
+        # Check and create feedback_staging table if missing
+        if "feedback_staging" not in tables:
+            logger.info("Migrating schema: creating feedback_staging table...")
+            with engine.begin() as conn:
+                conn.execute(text("""
+                    CREATE TABLE IF NOT EXISTS feedback_staging (
+                        id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+                        import_job_id VARCHAR(36) NOT NULL,
+                        user_id INTEGER,
+                        row_number INTEGER,
+                        text TEXT NOT NULL,
+                        clean_text TEXT,
+                        sentiment VARCHAR(20) NOT NULL,
+                        confidence FLOAT NOT NULL,
+                        positive_score FLOAT NOT NULL DEFAULT 0.0,
+                        neutral_score FLOAT NOT NULL DEFAULT 0.0,
+                        negative_score FLOAT NOT NULL DEFAULT 0.0,
+                        category VARCHAR(50),
+                        source VARCHAR(50),
+                        rating INTEGER,
+                        model_version VARCHAR(30) NOT NULL DEFAULT '3.0.0',
+                        created_at DATETIME NOT NULL,
+                        updated_at DATETIME NOT NULL
+                    )
+                """))
+                conn.execute(text("CREATE INDEX IF NOT EXISTS ix_feedback_staging_import_job_id ON feedback_staging (import_job_id)"))
+                conn.execute(text("CREATE INDEX IF NOT EXISTS ix_feedback_staging_user_id ON feedback_staging (user_id)"))
+                conn.execute(text("CREATE INDEX IF NOT EXISTS ix_feedback_staging_row_number ON feedback_staging (row_number)"))
+        else:
+            staging_cols = [c["name"] for c in inspector.get_columns("feedback_staging")]
+            if "row_number" not in staging_cols:
+                with engine.begin() as conn:
+                    conn.execute(text("ALTER TABLE feedback_staging ADD COLUMN row_number INTEGER"))
 
         if is_sqlite:
             # Check for dangling foreign keys referencing dropped 'users' table
@@ -160,7 +220,7 @@ def _migrate_schema() -> None:
                 res = conn.execute(text("SELECT version_num FROM alembic_version")).fetchone()
                 if not res:
                     conn.execute(text(f"INSERT INTO alembic_version (version_num) VALUES ('{latest_revision}')"))
-                elif res[0] in ("992b8e22d756", "b5f1a9238de4", "c4e2f187a912"):
+                elif res[0] in ("992b8e22d756", "b5f1a9238de4", "c4e2f187a912", "d5f3a1829e01"):
                     conn.execute(text(f"UPDATE alembic_version SET version_num = '{latest_revision}'"))
         else:
             try:

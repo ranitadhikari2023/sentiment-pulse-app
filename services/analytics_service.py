@@ -24,12 +24,15 @@ class AnalyticsService:
     def get_analytics(
         db: Session,
         start_date: Optional[datetime] = None,
-        end_date: Optional[datetime] = None
+        end_date: Optional[datetime] = None,
+        user_id: Optional[int] = None
     ) -> FeedbackAnalyticsResponse:
         """
         Computes business intelligence metrics across persisted feedback records.
         """
         base_query = db.query(Feedback)
+        if user_id is not None:
+            base_query = base_query.filter(Feedback.user_id == user_id)
         if start_date:
             base_query = base_query.filter(Feedback.created_at >= start_date)
         if end_date:

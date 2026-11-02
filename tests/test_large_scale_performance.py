@@ -344,9 +344,24 @@ def test_million_row_real_database_persistence(monkeypatch):
 
     monkeypatch.setattr("services.import_service.sentiment_service.predict", _fast_predict)
 
+    from sqlalchemy import create_engine, text
+    from sqlalchemy.orm import sessionmaker
+    from db.models import Base
+
     num_records = 1050000
     temp_path = GeneratorCSVFile.create_temp_csv(num_records)
-    db = SessionLocal()
+    
+    # Run against an isolated temporary database to keep sentiment.db completely clean
+    tmp_db = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+    tmp_db.close()
+    iso_engine = create_engine(f"sqlite:///{tmp_db.name}")
+    with iso_engine.connect() as conn:
+        conn.execute(text("PRAGMA journal_mode=WAL"))
+        conn.execute(text("PRAGMA synchronous=NORMAL"))
+        conn.commit()
+    Base.metadata.create_all(iso_engine)
+    IsoSession = sessionmaker(bind=iso_engine)
+    db = IsoSession()
     job_id = str(uuid.uuid4())
 
     try:
@@ -384,13 +399,16 @@ def test_million_row_real_database_persistence(monkeypatch):
 
     finally:
         try:
-            db.query(Feedback).filter(Feedback.category == "Performance").delete()
-            db.query(ImportJob).filter(ImportJob.id == job_id).delete()
-            db.commit()
-        except Exception:
-            db.rollback()
-        finally:
             db.close()
+            iso_engine.dispose()
+        except Exception:
+            pass
+
+        if os.path.exists(tmp_db.name):
+            try:
+                os.unlink(tmp_db.name)
+            except OSError:
+                pass
 
         if os.path.exists(temp_path):
             try:

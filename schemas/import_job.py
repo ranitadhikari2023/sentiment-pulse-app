@@ -17,7 +17,9 @@ class ImportJobResponse(BaseModel):
     processed_rows: int
     successful_rows: int
     failed_rows: int
+    last_checkpoint_row: Optional[int] = 0
     status: str
+    stage: Optional[str] = "QUEUED"
     error_summary: Optional[str] = None
     created_at: datetime
     completed_at: Optional[datetime] = None

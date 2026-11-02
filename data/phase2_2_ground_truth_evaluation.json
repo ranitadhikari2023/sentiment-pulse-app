@@ -1,0 +1,63 @@
+{
+  "dataset": "yelp_review_full (data/test.csv)",
+  "total_samples": 1500,
+  "model_architecture": "DistilBERT INT8 Quantized ONNX",
+  "accuracy": 0.7613,
+  "accuracy_pct": 76.13,
+  "accuracy_95_ci": [
+    73.91,
+    78.22
+  ],
+  "macro_f1": 0.7617,
+  "macro_f1_pct": 76.17,
+  "fp32_reference_accuracy": 0.7867,
+  "accuracy_delta_pct": -2.54,
+  "z_statistic": -1.6618,
+  "p_value": 0.0966,
+  "statistically_significant_difference": false,
+  "confusion_matrix": {
+    "labels": [
+      "negative",
+      "neutral",
+      "positive"
+    ],
+    "matrix": [
+      [
+        390,
+        103,
+        5
+      ],
+      [
+        72,
+        332,
+        88
+      ],
+      [
+        8,
+        82,
+        420
+      ]
+    ],
+    "description": "Rows represent True Labels, columns represent Predicted Labels"
+  },
+  "per_class_metrics": {
+    "negative": {
+      "precision": 0.8298,
+      "recall": 0.7831,
+      "f1_score": 0.8058,
+      "support": 498
+    },
+    "neutral": {
+      "precision": 0.6422,
+      "recall": 0.6748,
+      "f1_score": 0.6581,
+      "support": 492
+    },
+    "positive": {
+      "precision": 0.8187,
+      "recall": 0.8235,
+      "f1_score": 0.8211,
+      "support": 510
+    }
+  }
+}

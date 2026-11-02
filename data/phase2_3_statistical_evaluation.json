@@ -1,0 +1,102 @@
+{
+  "dataset": "yelp_review_full (data/test.csv)",
+  "evaluation_sample_size": 1500,
+  "evaluation_type": "Paired Categorical Comparison (Exact Same 1,500 Reviews)",
+  "models": {
+    "model_1_fp32": {
+      "name": "DistilBERT FP32 Reference",
+      "accuracy": 0.7867,
+      "accuracy_pct": 78.67,
+      "accuracy_95_ci": [
+        76.52,
+        80.67
+      ],
+      "macro_f1": 0.787,
+      "macro_f1_pct": 78.7,
+      "model_size_mb": 268.0,
+      "relative_inference_speed": "1.0x (Baseline)"
+    },
+    "model_2_int8": {
+      "name": "DistilBERT INT8 Dynamic Quantized ONNX",
+      "accuracy": 0.7613,
+      "accuracy_pct": 76.13,
+      "accuracy_95_ci": [
+        73.91,
+        78.22
+      ],
+      "macro_f1": 0.7617,
+      "macro_f1_pct": 76.17,
+      "model_size_mb": 64.27,
+      "relative_inference_speed": "3.1x (Optimized)"
+    }
+  },
+  "contingency_table_2x2": {
+    "b11_both_correct": 1124,
+    "b10_fp32_correct_int8_incorrect": 56,
+    "b01_fp32_incorrect_int8_correct": 18,
+    "b00_both_incorrect": 302,
+    "total_samples": 1500,
+    "description": "b11: both correct; b10: FP32 correct only; b01: INT8 correct only; b00: both wrong"
+  },
+  "mcnemar_test": {
+    "null_hypothesis": "Marginal probabilities of classification error are equal for FP32 and INT8 (no significant difference in error rates).",
+    "degrees_of_freedom": 1,
+    "discordant_pairs_total": 74,
+    "standard_chi2": 19.5135,
+    "standard_p_value": 1e-05,
+    "continuity_corrected_chi2": 18.5,
+    "continuity_corrected_p_value": 1.7e-05,
+    "statistically_significant_at_005": true,
+    "note": "Because FP32 and INT8 are tested on identical test cases, McNemar's paired test is the statistically correct test, replacing the independent samples z-test."
+  },
+  "per_class_metrics_int8": {
+    "negative": {
+      "precision": 0.8298,
+      "recall": 0.7831,
+      "f1_score": 0.8058,
+      "support": 498
+    },
+    "neutral": {
+      "precision": 0.6422,
+      "recall": 0.6748,
+      "f1_score": 0.6581,
+      "support": 492
+    },
+    "positive": {
+      "precision": 0.8187,
+      "recall": 0.8235,
+      "f1_score": 0.8211,
+      "support": 510
+    }
+  },
+  "confusion_matrix_int8": {
+    "labels": [
+      "negative",
+      "neutral",
+      "positive"
+    ],
+    "matrix": [
+      [
+        390,
+        103,
+        5
+      ],
+      [
+        72,
+        332,
+        88
+      ],
+      [
+        8,
+        82,
+        420
+      ]
+    ]
+  },
+  "practical_engineering_tradeoff": {
+    "accuracy_difference_pct": -2.53,
+    "memory_footprint_reduction_pct": 76.0,
+    "throughput_gain": "3.1x faster CPU token-to-logit throughput",
+    "operational_verdict": "Production Certified. A modest 2.54% difference in accuracy unlocks a 76% model memory reduction and 3x throughput speedup, essential for operating within Render container resource bounds (512 MB - 1 GB RAM)."
+  }
+}

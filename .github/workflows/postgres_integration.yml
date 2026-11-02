@@ -1,0 +1,56 @@
+name: PostgreSQL Production Database Integration
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  postgres-test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: sentiment_user
+          POSTGRES_PASSWORD: sentiment_password
+          POSTGRES_DB: sentiment_pulse_db
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install psycopg[binary] pytest pytest-asyncio
+
+      - name: Run Alembic migrations
+        env:
+          DATABASE_URL: postgresql+psycopg://sentiment_user:sentiment_password@localhost:5432/sentiment_pulse_db
+        run: |
+          alembic upgrade head
+
+      - name: Run PostgreSQL Integration Tests
+        env:
+          DATABASE_URL: postgresql+psycopg://sentiment_user:sentiment_password@localhost:5432/sentiment_pulse_db
+          TEST_POSTGRES: "1"
+        run: |
+          pytest tests/test_postgres_integration.py -v
+

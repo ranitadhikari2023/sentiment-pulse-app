@@ -1,0 +1,59 @@
+{
+  "stage_1_startup": {
+    "rss_mb": 70.61,
+    "peak_rss_mb": 70.61,
+    "private_mb": 530.27
+  },
+  "stage_2_model_load": {
+    "rss_mb": 163.48,
+    "peak_rss_mb": 182.97,
+    "private_mb": 614.38,
+    "delta_rss_mb": 92.87
+  },
+  "stage_3_tokenizer_init": {
+    "rss_mb": 170.86,
+    "peak_rss_mb": 182.97,
+    "private_mb": 620.28,
+    "delta_rss_mb": 7.38
+  },
+  "stage_4_dynamic_padding": {
+    "rss_mb": 188.76,
+    "peak_rss_mb": 195.04,
+    "private_mb": 638.72,
+    "tensor_shape": [
+      64,
+      256
+    ]
+  },
+  "stage_5_batched_inference": {
+    "rss_mb": 1283.12,
+    "peak_rss_mb": 1283.12,
+    "private_mb": 2771.63
+  },
+  "stage_6_parallel_inference": {
+    "rss_mb": 3015.58,
+    "peak_rss_mb": 3020.09,
+    "private_mb": 5952.83
+  },
+  "stage_7_simultaneous_imports": {
+    "rss_mb": 4636.1,
+    "peak_rss_mb": 4642.38,
+    "private_mb": 8169.41
+  },
+  "stage_8_after_completion": {
+    "rss_mb": 4636.0,
+    "peak_rss_mb": 4642.38,
+    "private_mb": 8169.28
+  },
+  "stage_9_after_failed_jobs": {
+    "rss_mb": 4636.06,
+    "peak_rss_mb": 4642.38,
+    "private_mb": 8169.56
+  },
+  "stage_10_repeated_cycles": {
+    "rss_mb": 5064.0,
+    "peak_rss_mb": 5064.09,
+    "private_mb": 8169.52,
+    "memory_leak_mb": 428.0
+  }
+}

@@ -14,6 +14,8 @@ Features:
 
 import os
 import uuid
+import json
+from datetime import datetime, timezone
 from contextlib import asynccontextmanager
 from typing import Dict, List, Optional, Any
 
@@ -22,11 +24,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
+from sqlalchemy import delete
 
 from core.config import settings
 from core.logging import setup_logging, get_logger
 from core.middleware import RequestContextMiddleware
-from db.session import init_db
+from db.session import init_db, SessionLocal
+from db.models import ImportJob, FeedbackStaging
 from services.sentiment_service import sentiment_service
 
 # Routers
@@ -56,6 +60,51 @@ logger = get_logger(__name__)
 async def lifespan(app: FastAPI):
     logger.info("Initializing database schema...")
     init_db()
+
+    # Self-healing startup recovery: preserve resumable checkpoints, purge orphaned unrecoverable jobs
+    try:
+        import hashlib
+        with SessionLocal() as db:
+            stale_jobs = db.query(ImportJob).filter(ImportJob.status.in_(["PENDING", "PROCESSING"])).all()
+            for j in stale_jobs:
+                is_recoverable = False
+                if j.file_path and os.path.exists(j.file_path):
+                    if j.file_hash:
+                        try:
+                            with open(j.file_path, "rb") as f_chk:
+                                if hashlib.sha256(f_chk.read()).hexdigest() == j.file_hash:
+                                    is_recoverable = True
+                        except Exception:
+                            is_recoverable = False
+                    else:
+                        is_recoverable = True
+
+                if is_recoverable:
+                    # Preserve staging rows and checkpoint progress for safe resumption
+                    j.status = "PENDING"
+                    j.stage = "QUEUED"
+                    j.last_checkpoint_row = j.processed_rows
+                    logger.info(
+                        f"Preserved recoverable import job '{j.id}' at checkpoint row {j.processed_rows} "
+                        f"with intact source file across server restart."
+                    )
+                else:
+                    j.status = "FAILED"
+                    j.stage = "FAILED"
+                    j.error_summary = json.dumps([
+                        "Import job was interrupted and source CSV file is missing or corrupted."
+                    ])
+                    j.completed_at = datetime.now(timezone.utc)
+                    db.execute(delete(FeedbackStaging).where(FeedbackStaging.import_job_id == j.id))
+                    logger.warning(
+                        f"Marked unrecoverable import job '{j.id}' as FAILED and purged staging records."
+                    )
+            if stale_jobs:
+                db.commit()
+                logger.info(f"Reconciled {len(stale_jobs)} interrupted import jobs on startup.")
+    except Exception as recovery_err:
+        logger.warning(f"Startup job recovery check skipped: {recovery_err}")
+
     logger.info("Verifying SentimentAnalyzer inference engine readiness...")
     if not sentiment_service.is_ready():
         sentiment_service._initialize()

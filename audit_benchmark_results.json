@@ -1,0 +1,178 @@
+{
+  "pipeline_a_parsing": {
+    "pipeline": "A_parsing_and_validation_only",
+    "rows": 100000,
+    "duration_sec": 0.148,
+    "throughput_rps": 674349.8
+  },
+  "pipeline_b_db_storage": {
+    "1000_rows": {
+      "pipeline": "B_database_insertion_without_inference",
+      "rows": 1000,
+      "total_duration_sec": 0.024,
+      "finalization_sec": 0.009,
+      "throughput_rps": 41699.9,
+      "initial_db_size_mb": 0.0,
+      "final_db_size_mb": 0.0,
+      "db_growth_mb": 0.0,
+      "persisted_records": 1000,
+      "remaining_staging": 0
+    },
+    "10000_rows": {
+      "pipeline": "B_database_insertion_without_inference",
+      "rows": 10000,
+      "total_duration_sec": 0.221,
+      "finalization_sec": 0.08,
+      "throughput_rps": 45351.1,
+      "initial_db_size_mb": 0.0,
+      "final_db_size_mb": 6.21,
+      "db_growth_mb": 6.21,
+      "persisted_records": 10000,
+      "remaining_staging": 0
+    },
+    "50000_rows": {
+      "pipeline": "B_database_insertion_without_inference",
+      "rows": 50000,
+      "total_duration_sec": 1.101,
+      "finalization_sec": 0.407,
+      "throughput_rps": 45412.9,
+      "initial_db_size_mb": 0.0,
+      "final_db_size_mb": 30.95,
+      "db_growth_mb": 30.95,
+      "persisted_records": 50000,
+      "remaining_staging": 0
+    },
+    "100000_rows": {
+      "pipeline": "B_database_insertion_without_inference",
+      "rows": 100000,
+      "total_duration_sec": 2.111,
+      "finalization_sec": 0.783,
+      "throughput_rps": 47372.9,
+      "initial_db_size_mb": 0.0,
+      "final_db_size_mb": 62.19,
+      "db_growth_mb": 62.18,
+      "persisted_records": 100000,
+      "remaining_staging": 0
+    }
+  },
+  "pipeline_c_onnx_inference": {
+    "pipeline": "C_real_batched_onnx_inference",
+    "single_item_unbatched": {
+      "evaluated_items": 100,
+      "latency_per_item_ms": 29.76,
+      "throughput_rps": 33.6
+    },
+    "batched_inference": {
+      "batch_32": {
+        "batch_size": 32,
+        "duration_sec": 1.0655,
+        "throughput_rps": 30.0,
+        "latency_per_item_ms": 33.3
+      },
+      "batch_64": {
+        "batch_size": 64,
+        "duration_sec": 2.0384,
+        "throughput_rps": 31.4,
+        "latency_per_item_ms": 31.85
+      },
+      "batch_128": {
+        "batch_size": 128,
+        "duration_sec": 4.1453,
+        "throughput_rps": 30.9,
+        "latency_per_item_ms": 32.39
+      },
+      "batch_256": {
+        "batch_size": 256,
+        "duration_sec": 8.6246,
+        "throughput_rps": 29.7,
+        "latency_per_item_ms": 33.69
+      },
+      "batch_500": {
+        "batch_size": 500,
+        "duration_sec": 16.0085,
+        "throughput_rps": 31.2,
+        "latency_per_item_ms": 32.02
+      },
+      "batch_1000": {
+        "batch_size": 1000,
+        "duration_sec": 36.129,
+        "throughput_rps": 27.7,
+        "latency_per_item_ms": 36.13
+      }
+    }
+  },
+  "pipeline_d_e2e_real_onnx": {
+    "100_rows": {
+      "pipeline": "D_e2e_with_real_onnx_inference",
+      "rows": 100,
+      "total_duration_sec": 3.25,
+      "throughput_rps": 30.8,
+      "tracemalloc_peak_mb": 0.63,
+      "os_rss_start_mb": 715.48,
+      "os_rss_final_mb": 717.49,
+      "os_peak_rss_mb": 720.79,
+      "os_private_bytes_mb": 1680.52,
+      "initial_db_size_mb": 0.0,
+      "final_db_size_mb": 0.0,
+      "db_growth_mb": 0.0,
+      "persisted_records": 100,
+      "remaining_staging": 0,
+      "status": "COMPLETED",
+      "stage": "COMPLETED"
+    },
+    "500_rows": {
+      "pipeline": "D_e2e_with_real_onnx_inference",
+      "rows": 500,
+      "total_duration_sec": 17.0,
+      "throughput_rps": 29.4,
+      "tracemalloc_peak_mb": 2.12,
+      "os_rss_start_mb": 717.55,
+      "os_rss_final_mb": 718.93,
+      "os_peak_rss_mb": 720.79,
+      "os_private_bytes_mb": 1681.32,
+      "initial_db_size_mb": 0.0,
+      "final_db_size_mb": 0.0,
+      "db_growth_mb": 0.0,
+      "persisted_records": 500,
+      "remaining_staging": 0,
+      "status": "COMPLETED",
+      "stage": "COMPLETED"
+    },
+    "1000_rows": {
+      "pipeline": "D_e2e_with_real_onnx_inference",
+      "rows": 1000,
+      "total_duration_sec": 33.32,
+      "throughput_rps": 30.0,
+      "tracemalloc_peak_mb": 4.01,
+      "os_rss_start_mb": 718.95,
+      "os_rss_final_mb": 723.04,
+      "os_peak_rss_mb": 723.04,
+      "os_private_bytes_mb": 1685.16,
+      "initial_db_size_mb": 0.0,
+      "final_db_size_mb": 0.0,
+      "db_growth_mb": 0.0,
+      "persisted_records": 1000,
+      "remaining_staging": 0,
+      "status": "COMPLETED",
+      "stage": "COMPLETED"
+    },
+    "2000_rows": {
+      "pipeline": "D_e2e_with_real_onnx_inference",
+      "rows": 2000,
+      "total_duration_sec": 68.6,
+      "throughput_rps": 29.2,
+      "tracemalloc_peak_mb": 7.81,
+      "os_rss_start_mb": 723.04,
+      "os_rss_final_mb": 729.94,
+      "os_peak_rss_mb": 735.73,
+      "os_private_bytes_mb": 1686.92,
+      "initial_db_size_mb": 0.0,
+      "final_db_size_mb": 0.0,
+      "db_growth_mb": 0.0,
+      "persisted_records": 2000,
+      "remaining_staging": 0,
+      "status": "COMPLETED",
+      "stage": "COMPLETED"
+    }
+  }
+}

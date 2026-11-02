@@ -1,0 +1,67 @@
+{
+  "deployment_profiles": {
+    "profile_1": {
+      "peak_rss_mb": 166.6,
+      "p50_latency_ms": 6.1,
+      "p95_latency_ms": 7.1,
+      "status": "PASS"
+    },
+    "profile_2": {
+      "peak_rss_mb": 168.4,
+      "p50_latency_ms": 0.0,
+      "p95_latency_ms": 0.0,
+      "status": "PASS"
+    },
+    "profile_3": {
+      "throughput_rps": 500.3,
+      "peak_rss_mb": 192.8,
+      "status": "PASS"
+    }
+  },
+  "e2e_ingestion": {
+    "10000": {
+      "records": 10000,
+      "wall_clock_sec": 3.22,
+      "throughput_rps": 3102.4,
+      "status": "COMPLETED",
+      "persisted_feedback": 10000,
+      "remaining_staging": 0,
+      "db_size_mb": 7.41,
+      "db_growth_mb": 7.34,
+      "peak_rss_mb": 201.5
+    },
+    "100000": {
+      "records": 100000,
+      "wall_clock_sec": 3.38,
+      "throughput_rps": 29588.0,
+      "status": "COMPLETED",
+      "persisted_feedback": 100000,
+      "remaining_staging": 0,
+      "db_size_mb": 74.31,
+      "db_growth_mb": 66.9,
+      "peak_rss_mb": 201.9
+    },
+    "500000": {
+      "records": 500000,
+      "wall_clock_sec": 18.07,
+      "throughput_rps": 27664.1,
+      "status": "COMPLETED",
+      "persisted_feedback": 500000,
+      "remaining_staging": 0,
+      "db_size_mb": 372.8,
+      "db_growth_mb": 298.5,
+      "peak_rss_mb": 201.9
+    },
+    "1050000": {
+      "records": 1050000,
+      "wall_clock_sec": 42.19,
+      "throughput_rps": 24885.0,
+      "status": "COMPLETED",
+      "persisted_feedback": 1050000,
+      "remaining_staging": 0,
+      "db_size_mb": 783.28,
+      "db_growth_mb": 410.48,
+      "peak_rss_mb": 202.6
+    }
+  }
+}

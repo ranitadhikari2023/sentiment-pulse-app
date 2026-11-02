@@ -6,12 +6,13 @@ No authentication required.
 
 from typing import Optional
 from datetime import datetime, timezone
-from fastapi import APIRouter, Depends, HTTPException, status, Query, Response
+from fastapi import APIRouter, Depends, HTTPException, status, Query, Response, Request
 from sqlalchemy.orm import Session
 
 from db.session import get_db
 from services.feedback_service import FeedbackService
 from services.import_service import ImportService
+from core.security import resolve_trusted_tenant_identity
 from schemas.feedback import (
     FeedbackCreate,
     FeedbackResponse,
@@ -26,9 +27,10 @@ router = APIRouter(prefix="/feedback", tags=["Customer Feedback"])
 api_router = APIRouter(prefix="/api/feedback", tags=["Customer Feedback"])
 
 
-def _create_feedback_handler(payload: FeedbackCreate, db: Session):
+def _create_feedback_handler(request: Request, payload: FeedbackCreate, db: Session):
     try:
-        feedback = FeedbackService.create_feedback(db, payload)
+        user_id = resolve_trusted_tenant_identity(request)
+        feedback = FeedbackService.create_feedback(db, payload, user_id=user_id)
         return FeedbackResponse.from_orm_model(feedback)
     except ValueError as ve:
         db.rollback()
@@ -46,6 +48,7 @@ def _create_feedback_handler(payload: FeedbackCreate, db: Session):
 
 
 def _list_feedback_handler(
+    request: Request,
     page: int,
     page_size: int,
     sentiment: Optional[str],
@@ -59,6 +62,8 @@ def _list_feedback_handler(
     sort_order: str,
     db: Session
 ):
+    user_id = resolve_trusted_tenant_identity(request)
+
     return FeedbackService.list_feedback(
         db=db,
         page=page,
@@ -71,21 +76,46 @@ def _list_feedback_handler(
         end_date=end_date,
         search=search,
         sort_by=sort_by,
-        sort_order=sort_order
+        sort_order=sort_order,
+        user_id=user_id
     )
 
 
-def _get_feedback_by_id_handler(feedback_id: int, db: Session):
+def _get_feedback_by_id_handler(request: Request, feedback_id: int, db: Session):
     fb = FeedbackService.get_feedback_by_id(db, feedback_id)
     if not fb:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Feedback record {feedback_id} not found."
         )
+
+    user_id = resolve_trusted_tenant_identity(request)
+    if fb.user_id is not None:
+        if user_id is None or user_id != fb.user_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied: Feedback record belongs to another tenant."
+            )
+
     return FeedbackResponse.from_orm_model(fb)
 
 
-def _delete_feedback_handler(feedback_id: int, db: Session):
+def _delete_feedback_handler(request: Request, feedback_id: int, db: Session):
+    fb = FeedbackService.get_feedback_by_id(db, feedback_id)
+    if not fb:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Feedback record {feedback_id} not found."
+        )
+
+    user_id = resolve_trusted_tenant_identity(request)
+    if fb.user_id is not None:
+        if user_id is None or user_id != fb.user_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied: Feedback record belongs to another tenant."
+            )
+
     success = FeedbackService.delete_feedback(db, feedback_id)
     if not success:
         raise HTTPException(
@@ -95,12 +125,14 @@ def _delete_feedback_handler(feedback_id: int, db: Session):
     return {"message": f"Feedback record {feedback_id} deleted successfully."}
 
 
-def _stats_handler(db: Session):
-    return FeedbackService.get_feedback_stats(db)
+def _stats_handler(request: Request, db: Session):
+    user_id = resolve_trusted_tenant_identity(request)
+    return FeedbackService.get_feedback_stats(db, user_id=user_id)
 
 
-def _export_handler(db: Session):
-    csv_content = ImportService.generate_csv_export(db)
+def _export_handler(request: Request, db: Session):
+    user_id = resolve_trusted_tenant_identity(request)
+    csv_content = ImportService.generate_csv_export(db, user_id=user_id)
     timestamp_str = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     filename = f"feedback_export_{timestamp_str}.csv"
     return Response(
@@ -114,28 +146,32 @@ def _export_handler(db: Session):
 for r in (router, api_router):
     @r.post("", response_model=FeedbackResponse, status_code=status.HTTP_201_CREATED)
     def create_feedback_endpoint(
+        request: Request,
         payload: FeedbackCreate,
         db: Session = Depends(get_db)
     ):
         """Creates feedback, infers sentiment, and persists record."""
-        return _create_feedback_handler(payload, db)
+        return _create_feedback_handler(request, payload, db)
 
     @r.get("/stats", response_model=FeedbackStatsResponse)
     def get_stats_endpoint(
+        request: Request,
         db: Session = Depends(get_db)
     ):
         """Returns sentiment statistics aggregated across feedback records."""
-        return _stats_handler(db)
+        return _stats_handler(request, db)
 
     @r.get("/export")
     def export_feedback_endpoint(
+        request: Request,
         db: Session = Depends(get_db)
     ):
         """Exports feedback as CSV with formula injection protection."""
-        return _export_handler(db)
+        return _export_handler(request, db)
 
     @r.get("", response_model=FeedbackListResponse)
     def list_feedback_endpoint(
+        request: Request,
         page: int = Query(1, ge=1, description="Page number"),
         page_size: int = Query(20, ge=1, le=100, description="Items per page"),
         sentiment: Optional[str] = Query(None, description="Filter by sentiment (positive, neutral, negative)"),
@@ -151,22 +187,24 @@ for r in (router, api_router):
     ):
         """Retrieves paginated feedback records."""
         return _list_feedback_handler(
-            page, page_size, sentiment, category, source, min_confidence,
+            request, page, page_size, sentiment, category, source, min_confidence,
             start_date, end_date, search, sort_by, sort_order, db
         )
 
     @r.get("/{feedback_id}", response_model=FeedbackResponse)
     def get_feedback_endpoint(
+        request: Request,
         feedback_id: int,
         db: Session = Depends(get_db)
     ):
         """Retrieves a single feedback record."""
-        return _get_feedback_by_id_handler(feedback_id, db)
+        return _get_feedback_by_id_handler(request, feedback_id, db)
 
     @r.delete("/{feedback_id}")
     def delete_feedback_endpoint(
+        request: Request,
         feedback_id: int,
         db: Session = Depends(get_db)
     ):
         """Deletes a feedback record."""
-        return _delete_feedback_handler(feedback_id, db)
+        return _delete_feedback_handler(request, feedback_id, db)
