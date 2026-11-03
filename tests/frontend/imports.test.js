@@ -749,5 +749,164 @@ describe('Imports Controller & 100 MB Limit Subsystem', () => {
         'Bar must remain rose-500'
       );
     });
+
+    it('handles Cloudflare challenge HTML response safely without rendering HTML or failing job', async () => {
+      const cfError = new Error(
+        'Cloudflare security challenge encountered. Edge verification required.'
+      );
+      cfError.status = 403;
+      cfError.isCloudflareChallenge = true;
+      cfError.detail = null;
+
+      window.api.getImportJob = async () => {
+        throw cfError;
+      };
+
+      // Set initial active progress
+      elements['import-progress-bar'].style.width = '45%';
+      elements['import-progress-pct'].textContent = '45%';
+      ImportsController._lastProgressPct = 45;
+
+      ImportsController.pollJob('job-cf-1');
+      await ImportsController.executePollTick('job-cf-1');
+
+      // 1. Verify job is NOT marked terminal or failed
+      assert.equal(ImportsController._isTerminal, false, 'Job must not be marked terminal');
+      assert.equal(ImportsController._consecutivePollErrors, 1);
+
+      // 2. Verify progress bar and percentage are preserved
+      assert.equal(elements['import-progress-bar'].style.width, '45%');
+      assert.equal(elements['import-progress-pct'].textContent, '45%');
+
+      // 3. Verify status message indicates temporary unavailability and does NOT leak raw HTML
+      const statusText = elements['import-progress-status'].textContent;
+      assert.ok(
+        statusText.includes('temporarily unavailable'),
+        'Must indicate temporary unavailability'
+      );
+      assert.ok(!statusText.includes('<!DOCTYPE'), 'Must never leak HTML doctype');
+      assert.ok(!statusText.includes('<html'), 'Must never leak raw html tag');
+      assert.ok(!statusText.includes('cf_chl_opt'), 'Must never leak Cloudflare challenge tokens');
+
+      ImportsController.cleanup();
+    });
+
+    it('respects Retry-After header on HTTP 429 rate limit response', async () => {
+      const rateLimitError = new Error('Rate limit exceeded. Please retry in 7 seconds.');
+      rateLimitError.status = 429;
+      rateLimitError.retryAfter = 7;
+
+      window.api.getImportJob = async () => {
+        throw rateLimitError;
+      };
+
+      let scheduledDelay = null;
+      const origSchedule = ImportsController.scheduleNextPoll;
+      ImportsController.scheduleNextPoll = (jobId, delayMs) => {
+        scheduledDelay = delayMs;
+      };
+
+      try {
+        ImportsController.pollJob('job-rate-1');
+        await ImportsController.executePollTick('job-rate-1');
+
+        assert.equal(ImportsController._isTerminal, false);
+        assert.equal(scheduledDelay, 7000, 'Must honor 7-second Retry-After delay (7000ms)');
+      } finally {
+        ImportsController.scheduleNextPoll = origSchedule;
+        ImportsController.cleanup();
+      }
+    });
+
+    it('prevents overlapping polling ticks when a request is in flight', async () => {
+      let callCount = 0;
+      let resolveFirst;
+      const firstPromise = new Promise((resolve) => {
+        resolveFirst = resolve;
+      });
+
+      window.api.getImportJob = async () => {
+        callCount += 1;
+        await firstPromise;
+        return {
+          id: 'job-overlap-1',
+          status: 'PROCESSING',
+          total_rows: 100,
+          processed_rows: 50,
+          successful_rows: 50,
+          failed_rows: 0,
+        };
+      };
+
+      ImportsController.pollJob('job-overlap-1');
+
+      // Start first tick (in flight)
+      const tick1 = ImportsController.executePollTick('job-overlap-1');
+      assert.equal(ImportsController._pollInFlight, true);
+
+      // Attempt second tick concurrently
+      const tick2 = ImportsController.executePollTick('job-overlap-1');
+
+      resolveFirst();
+      await Promise.all([tick1, tick2]);
+
+      assert.equal(callCount, 1, 'Second tick must be skipped while first tick is in flight');
+      ImportsController.cleanup();
+    });
+
+    it('recovers polling seamlessly after transient errors without resetting progress', async () => {
+      let attempt = 0;
+      window.api.getImportJob = async () => {
+        attempt += 1;
+        if (attempt === 1) {
+          const netErr = new Error('Network error: Unable to connect to server.');
+          netErr.status = 0;
+          throw netErr;
+        }
+        return {
+          id: 'job-recover-1',
+          status: 'PROCESSING',
+          total_rows: 1000,
+          processed_rows: 600,
+          successful_rows: 600,
+          failed_rows: 0,
+        };
+      };
+
+      ImportsController.pollJob('job-recover-1');
+
+      // Attempt 1: Network error
+      await ImportsController.executePollTick('job-recover-1');
+      assert.equal(ImportsController._consecutivePollErrors, 1);
+      assert.equal(ImportsController._isTerminal, false);
+
+      // Attempt 2: Successful response
+      await ImportsController.executePollTick('job-recover-1');
+      assert.equal(
+        ImportsController._consecutivePollErrors,
+        0,
+        'Consecutive errors must reset to 0'
+      );
+      assert.equal(ImportsController._isTerminal, false);
+      assert.ok(elements['import-progress-status'].textContent.includes('600 / 1,000 records'));
+
+      ImportsController.cleanup();
+    });
+
+    it('adapts polling interval based on tab visibility', () => {
+      // Normal foreground interval
+      const foregroundInterval = ImportsController.computeNextIntervalMs(0);
+      assert.ok(foregroundInterval >= 1500 && foregroundInterval <= 2500, 'Initial interval ~2s');
+
+      // Error backoff schedule
+      const backoff1 = ImportsController.computeNextIntervalMs(1);
+      assert.ok(backoff1 >= 3000 && backoff1 <= 5000, '1st retry interval ~4s');
+
+      const backoff2 = ImportsController.computeNextIntervalMs(2);
+      assert.ok(backoff2 >= 6500 && backoff2 <= 9500, '2nd retry interval ~8s');
+
+      const backoff3 = ImportsController.computeNextIntervalMs(3);
+      assert.ok(backoff3 >= 12000 && backoff3 <= 15000, '3rd retry interval ~15s');
+    });
   });
 });

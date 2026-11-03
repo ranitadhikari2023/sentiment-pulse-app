@@ -8,13 +8,27 @@ const MAX_UPLOAD_BYTES = 100 * 1024 * 1024; // 100 MB (104,857,600 bytes)
 const MAX_IMPORT_ROWS = 1050000;
 const MAX_IMPORT_ROWS_FORMATTED = '1,050,000';
 
+const POLLING_CONFIG = {
+  initialIntervalMs: 2000,
+  retryScheduleMs: [2000, 4000, 8000, 15000],
+  maxIntervalMs: 15000,
+  jitterRatio: 0.15,
+  backgroundIntervalMs: 30000,
+  pollTimeoutMs: 15000,
+  maxConsecutiveErrors: 20,
+};
+
 const ImportsController = {
   selectedFile: null,
   isUploading: false,
   MAX_UPLOAD_BYTES: MAX_UPLOAD_BYTES,
   MAX_IMPORT_ROWS: MAX_IMPORT_ROWS,
   MAX_IMPORT_ROWS_FORMATTED: MAX_IMPORT_ROWS_FORMATTED,
+  POLLING_CONFIG: POLLING_CONFIG,
   pollingInterval: null,
+  _pollTimeoutId: null,
+  _pollAbortController: null,
+  _visibilityListenerBound: false,
   _lastProgressPct: 0,
   _consecutivePollErrors: 0,
   _statusPulseTween: null,
@@ -36,7 +50,30 @@ const ImportsController = {
 
   init() {
     this.bindEvents();
+    this.setupVisibilityListener();
     this.restoreActiveJob();
+  },
+
+  setupVisibilityListener() {
+    if (
+      this._visibilityListenerBound ||
+      typeof document === 'undefined' ||
+      typeof document.addEventListener !== 'function'
+    ) {
+      return;
+    }
+    document.addEventListener('visibilitychange', () => {
+      if (!this._activeJobId || this._isTerminal) return;
+      if (document.visibilityState === 'visible') {
+        // Tab foregrounded: trigger an immediate status poll if no poll is in flight
+        if (!this._pollInFlight && this._pollTimeoutId) {
+          clearTimeout(this._pollTimeoutId);
+          this._pollTimeoutId = null;
+          this.executePollTick(this._activeJobId);
+        }
+      }
+    });
+    this._visibilityListenerBound = true;
   },
 
   restoreActiveJob() {
@@ -51,9 +88,19 @@ const ImportsController = {
   },
 
   cleanup() {
+    if (this._pollTimeoutId) {
+      clearTimeout(this._pollTimeoutId);
+      this._pollTimeoutId = null;
+    }
     if (this.pollingInterval) {
       clearInterval(this.pollingInterval);
       this.pollingInterval = null;
+    }
+    if (this._pollAbortController) {
+      try {
+        this._pollAbortController.abort();
+      } catch {}
+      this._pollAbortController = null;
     }
     this._consecutivePollErrors = 0;
     this._isTerminal = false;
@@ -266,41 +313,55 @@ const ImportsController = {
   categorizeError(err) {
     const status = err.status || 0;
     const msg = (err.message || '').toLowerCase();
-    const detail = (typeof err.detail === 'string' ? err.detail : JSON.stringify(err.detail || '')).toLowerCase();
+    const detail = (
+      typeof err.detail === 'string' ? err.detail : JSON.stringify(err.detail || '')
+    ).toLowerCase();
     const errorType = err.errorType || '';
 
     // 1. File size limit
     if (status === 413 || msg.includes('maximum allowed size') || msg.includes('100 mb')) {
       return {
         title: 'File Too Large',
-        message: 'The uploaded file exceeds the 100 MB maximum size limit.',
+        message: err.message || 'The uploaded file exceeds the 100 MB maximum size limit.',
         statusText: '413 Payload Too Large',
       };
     }
 
-    // 2. Unsupported encoding
+    // 2. Cloudflare challenge / edge security
+    if (err.isCloudflareChallenge || msg.includes('cloudflare') || detail.includes('cf_chl_opt')) {
+      return {
+        title: 'Edge Security Challenge',
+        message:
+          err.message || 'Cloudflare security challenge encountered. Edge verification required.',
+        statusText: '403 Forbidden',
+      };
+    }
+
+    // 3. Unsupported encoding
     if (msg.includes('encoding') || detail.includes('encoding')) {
       return {
         title: 'Unsupported CSV Encoding',
-        message: 'Unsupported character encoding. Please save your CSV as standard UTF-8 or Latin-1.',
+        message:
+          'Unsupported character encoding. Please save your CSV as standard UTF-8 or Latin-1.',
         statusText: status ? `${status} Bad Request` : 'Encoding Error',
       };
     }
 
-    // 3. Missing required text column
+    // 4. Missing required text column
     if (
-      msg.includes('must contain a \'text\'') ||
+      msg.includes("must contain a 'text'") ||
       msg.includes('missing text column') ||
-      detail.includes('must contain a \'text\'')
+      detail.includes("must contain a 'text'")
     ) {
       return {
         title: 'Missing Required Text Column',
-        message: 'CSV header must include a required feedback text column (e.g. "text", "review", or "feedback").',
+        message:
+          'CSV header must include a required feedback text column (e.g. "text", "review", or "feedback").',
         statusText: status ? `${status} Bad Request` : 'Header Validation Error',
       };
     }
 
-    // 4. Empty CSV
+    // 5. Empty CSV
     if (msg.includes('empty') || detail.includes('empty')) {
       return {
         title: 'Empty CSV File',
@@ -309,7 +370,7 @@ const ImportsController = {
       };
     }
 
-    // 5. Database Schema Error
+    // 6. Database Schema Error
     if (
       errorType === 'database_schema_error' ||
       msg.includes('database schema') ||
@@ -319,12 +380,13 @@ const ImportsController = {
     ) {
       return {
         title: 'Database Schema Error',
-        message: 'Database schema mismatch: required table or column does not exist. Database migrations must be applied.',
+        message:
+          'Database schema mismatch: required table or column does not exist. Database migrations must be applied.',
         statusText: `${status || 500} Database Schema Error`,
       };
     }
 
-    // 6. Database Connection Failure
+    // 7. Database Connection Failure
     if (
       errorType === 'database_connection_error' ||
       status === 503 ||
@@ -334,12 +396,13 @@ const ImportsController = {
     ) {
       return {
         title: 'Database Connection Failure',
-        message: 'Unable to connect to the database. The database service may be restarting or unavailable.',
+        message:
+          'Unable to connect to the database. The database service may be restarting or unavailable.',
         statusText: `${status || 503} Service Unavailable`,
       };
     }
 
-    // 7. Request Timeout
+    // 8. Request Timeout
     if (
       msg.includes('timeout') ||
       msg.includes('timed out') ||
@@ -348,22 +411,28 @@ const ImportsController = {
     ) {
       return {
         title: 'Request Timeout',
-        message: 'Upload request timed out before the server completed receipt. Please retry.',
+        message:
+          err.message ||
+          'Upload request timed out before the server completed receipt. Please retry.',
         statusText: '408 Request Timeout',
       };
     }
 
-    // 8. Rate Limiting / Concurrent Limits
+    // 9. Rate Limiting / Concurrent Limits
     if (status === 429 || msg.includes('concurrent import limit')) {
       return {
         title: 'Concurrent Import Limit Reached',
-        message: 'Too many batch imports are currently running. Please wait for active jobs to complete.',
+        message:
+          'Too many batch imports are currently running. Please wait for active jobs to complete.',
         statusText: '429 Too Many Requests',
       };
     }
 
-    // 9. Import Job Creation Failure
-    if (errorType === 'import_job_creation_failed' || msg.includes('failed to initialize import job')) {
+    // 10. Import Job Creation Failure
+    if (
+      errorType === 'import_job_creation_failed' ||
+      msg.includes('failed to initialize import job')
+    ) {
       return {
         title: 'Import Job Creation Failed',
         message: 'Server failed to initialize batch import job record.',
@@ -371,10 +440,12 @@ const ImportsController = {
       };
     }
 
-    // 10. General Server-Side Processing Failure
+    // 11. General Server-Side Processing Failure
     return {
       title: 'Server-Side Processing Error',
-      message: err.message || 'An unexpected internal error occurred on the server while processing the upload.',
+      message:
+        err.message ||
+        'An unexpected internal error occurred on the server while processing the upload.',
       statusText: `${status || 500} Internal Server Error`,
     };
   },
@@ -452,7 +523,8 @@ const ImportsController = {
       this.stopPollingPulse();
 
       const cat = this.categorizeError(err);
-      let errorDisplay = `Upload error [${cat.statusText}]: ${cat.message}`;
+      const rawMsg = err.message || '';
+      let errorDisplay = rawMsg || `Upload error [${cat.statusText}]: ${cat.message}`;
       if (err.jobId) {
         errorDisplay += ` (Job ID: ${err.jobId})`;
       } else if (err.requestId) {
@@ -480,213 +552,297 @@ const ImportsController = {
     }
   },
 
+  computeNextIntervalMs(consecutiveErrors, retryAfterSec) {
+    // If the edge server supplied Retry-After, honor it directly
+    if (retryAfterSec && typeof retryAfterSec === 'number' && retryAfterSec > 0) {
+      return Math.max(retryAfterSec * 1000, 2000);
+    }
+
+    // When the browser tab is backgrounded, reduce polling frequency to save battery and edge quota
+    if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+      return this.POLLING_CONFIG.backgroundIntervalMs;
+    }
+
+    // Progressive exponential backoff schedule: 2s -> 4s -> 8s -> 15s max
+    let baseMs = this.POLLING_CONFIG.initialIntervalMs;
+    if (consecutiveErrors > 0) {
+      const idx = Math.min(consecutiveErrors, this.POLLING_CONFIG.retryScheduleMs.length - 1);
+      baseMs = this.POLLING_CONFIG.retryScheduleMs[idx];
+    }
+
+    // Apply random retry jitter (±15%) to avoid client synchronization / thundering herds
+    const jitter = (Math.random() * 2 - 1) * this.POLLING_CONFIG.jitterRatio;
+    const intervalWithJitter = Math.round(baseMs * (1 + jitter));
+    return Math.min(Math.max(intervalWithJitter, 1000), this.POLLING_CONFIG.maxIntervalMs);
+  },
+
+  scheduleNextPoll(jobId, delayMs) {
+    if (this._isTerminal || this._activeJobId !== jobId) return;
+    if (this._pollTimeoutId) {
+      clearTimeout(this._pollTimeoutId);
+      this._pollTimeoutId = null;
+    }
+    this._pollTimeoutId = setTimeout(() => {
+      this._pollTimeoutId = null;
+      this.executePollTick(jobId);
+    }, delayMs);
+    this.pollingInterval = this._pollTimeoutId;
+  },
+
   pollJob(jobId) {
+    try {
+      localStorage.setItem('sentiment_pulse_active_import_job', jobId);
+    } catch {}
+
+    if (this._pollTimeoutId) {
+      clearTimeout(this._pollTimeoutId);
+      this._pollTimeoutId = null;
+    }
+    if (this.pollingInterval) {
+      clearInterval(this.pollingInterval);
+      this.pollingInterval = null;
+    }
+    if (this._pollAbortController) {
+      try {
+        this._pollAbortController.abort();
+      } catch {}
+      this._pollAbortController = null;
+    }
+
+    this._consecutivePollErrors = 0;
+    this._activeJobId = jobId;
+    this._isTerminal = false;
+    this._pollInFlight = false;
+
+    // Trigger first poll using configured initial interval
+    this.scheduleNextPoll(jobId, this.POLLING_CONFIG.initialIntervalMs);
+  },
+
+  async executePollTick(jobId) {
+    // 1. Guard against polling when job has reached terminal state or switched jobs
+    if (this._isTerminal || this._activeJobId !== jobId) {
+      return;
+    }
+
+    // 2. Prevent overlapping async fetch calls
+    if (this._pollInFlight) {
+      return;
+    }
+
+    this._pollInFlight = true;
+    const seq = ++this._pollSequence;
+
+    const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    this._pollAbortController = controller;
+
     const progressText = document.getElementById('import-progress-status');
     const progressBar = document.getElementById('import-progress-bar');
     const progressPct = document.getElementById('import-progress-pct');
     const uploadBtn = document.getElementById('import-submit-btn');
 
     try {
-      localStorage.setItem('sentiment_pulse_active_import_job', jobId);
-    } catch {}
+      const job = await window.api.getImportJob(jobId, {
+        signal: controller ? controller.signal : undefined,
+        timeoutMs: this.POLLING_CONFIG.pollTimeoutMs,
+      });
 
-    if (this.pollingInterval) {
-      clearInterval(this.pollingInterval);
-      this.pollingInterval = null;
-    }
-    this._consecutivePollErrors = 0;
-    this._activeJobId = jobId;
-    this._isTerminal = false;
-    this._pollInFlight = false;
+      this._pollInFlight = false;
+      this._pollAbortController = null;
+      this._consecutivePollErrors = 0;
 
-    this.pollingInterval = setInterval(async () => {
-      // 1. Guard against stale polling when job has reached terminal state or switched jobs
-      if (this._isTerminal || this._activeJobId !== jobId) {
+      // 3. Drop response if terminal state was reached or new job began while in-flight
+      if (this._isTerminal || this._activeJobId !== jobId || seq < this._pollSequence) {
+        return;
+      }
+
+      // 4. Authoritative check: handle terminal states immediately before any progress rendering
+      if (job.status === 'COMPLETED' || job.status === 'FAILED' || job.status === 'CANCELLED') {
+        this._isTerminal = true;
+        if (this._pollTimeoutId) {
+          clearTimeout(this._pollTimeoutId);
+          this._pollTimeoutId = null;
+        }
         if (this.pollingInterval) {
           clearInterval(this.pollingInterval);
           this.pollingInterval = null;
         }
+        this.stopPollingPulse();
+
+        if (job.status === 'COMPLETED') {
+          this.renderJobSuccess(job);
+        } else if (job.status === 'CANCELLED') {
+          this.renderJobCancelled(job);
+        } else {
+          this.renderJobFailure(job);
+        }
         return;
       }
 
-      // 2. Prevent overlapping async fetch calls
-      if (this._pollInFlight) {
+      // 5. Non-terminal states: PENDING
+      if (job.status === 'PENDING') {
+        if (progressText) {
+          progressText.textContent = 'Import queued in background. Waiting for worker...';
+        }
+        if (progressBar) {
+          progressBar.style.width = '15%';
+          progressBar.classList.remove('animate-pulse');
+        }
+        if (progressPct) progressPct.textContent = '15%';
+        this.scheduleNextPoll(jobId, this.computeNextIntervalMs(0));
         return;
       }
 
-      this._pollInFlight = true;
-      const seq = ++this._pollSequence;
+      // 6. Non-terminal states: PROCESSING
+      const processed = job.processed_rows || 0;
+      const total = job.total_rows || 0;
+      const successful =
+        job.successful_rows !== undefined ? job.successful_rows : job.inserted_rows || 0;
+      const failed = job.failed_rows || 0;
+      const stage = job.stage || 'PROCESSING';
 
-      try {
-        const job = await window.api.getImportJob(jobId);
-        this._pollInFlight = false;
-        this._consecutivePollErrors = 0;
+      if (stage === 'FINALIZING') {
+        this._lastProgressPct = Math.max(98, this._lastProgressPct);
+        if (progressBar) {
+          progressBar.style.width = '98%';
+          progressBar.classList.add('animate-pulse');
+        }
+        if (progressPct) progressPct.textContent = '98%';
+        if (progressText) {
+          progressText.textContent = 'Finalizing batch and committing records to database...';
+        }
+        this.scheduleNextPoll(jobId, this.computeNextIntervalMs(0));
+        return;
+      }
 
-        // 3. Drop response if terminal state was reached or new job began while in-flight
-        if (this._isTerminal || this._activeJobId !== jobId || seq < this._pollSequence) {
-          return;
+      if (stage === 'PARSING') {
+        this._lastProgressPct = Math.max(20, this._lastProgressPct);
+        if (progressBar) {
+          progressBar.style.width = '20%';
+          progressBar.classList.add('animate-pulse');
+        }
+        if (progressPct) progressPct.textContent = '20%';
+        if (progressText) {
+          progressText.textContent = 'Parsing CSV file structure and detecting delimiters...';
+        }
+        this.scheduleNextPoll(jobId, this.computeNextIntervalMs(0));
+        return;
+      }
+
+      if (stage === 'VALIDATING') {
+        this._lastProgressPct = Math.max(25, this._lastProgressPct);
+        if (progressBar) {
+          progressBar.style.width = '25%';
+          progressBar.classList.add('animate-pulse');
+        }
+        if (progressPct) progressPct.textContent = '25%';
+        if (progressText) {
+          progressText.textContent = 'Validating columns and calculating record boundaries...';
+        }
+        this.scheduleNextPoll(jobId, this.computeNextIntervalMs(0));
+        return;
+      }
+
+      if (processed > 0 && total > 0) {
+        const ratio = Math.min(processed / total, 1.0);
+        const pct = Math.min(25 + Math.round(ratio * 70), 96);
+        const displayPct = Math.max(pct, this._lastProgressPct);
+        this._lastProgressPct = displayPct;
+
+        if (!this._ingestStartTime) {
+          this._ingestStartTime = Date.now();
+          this._ingestStartProcessed = processed;
+        }
+        let etaStr = '';
+        const elapsedSec = (Date.now() - this._ingestStartTime) / 1000;
+        const processedDelta = processed - this._ingestStartProcessed;
+        if (elapsedSec > 2 && processedDelta > 0 && total > processed) {
+          const rps = processedDelta / elapsedSec;
+          const remaining = total - processed;
+          const etaSec = Math.round(remaining / Math.max(rps, 0.1));
+          if (etaSec > 60) {
+            etaStr = ` • ETA: ~${Math.floor(etaSec / 60)}m ${etaSec % 60}s`;
+          } else if (etaSec > 0) {
+            etaStr = ` • ETA: ~${etaSec}s`;
+          }
         }
 
-        // 4. Authoritative check: handle terminal states immediately before any progress rendering
-        if (job.status === 'COMPLETED' || job.status === 'FAILED') {
-          this._isTerminal = true;
-          if (this.pollingInterval) {
-            clearInterval(this.pollingInterval);
-            this.pollingInterval = null;
-          }
-          this.stopPollingPulse();
-
-          if (job.status === 'COMPLETED') {
-            this.renderJobSuccess(job);
-          } else {
-            this.renderJobFailure(job);
-          }
-          return;
+        if (progressBar) {
+          progressBar.style.width = `${displayPct}%`;
+          progressBar.classList.remove('animate-pulse');
         }
-
-        // 5. Non-terminal states: PENDING
-        if (job.status === 'PENDING') {
-          if (progressText) {
-            progressText.textContent = 'Import queued in background. Waiting for worker...';
-          }
-          if (progressBar) {
-            progressBar.style.width = '15%';
-            progressBar.classList.remove('animate-pulse');
-          }
-          if (progressPct) progressPct.textContent = '15%';
-          return;
+        if (progressPct) progressPct.textContent = `${displayPct}%`;
+        if (progressText) {
+          progressText.textContent = `Processing ${processed.toLocaleString()} / ${total.toLocaleString()} records${etaStr} (Inserted: ${successful.toLocaleString()} | Rejected: ${failed.toLocaleString()})`;
         }
-
-        // 6. Non-terminal states: PROCESSING
-        const processed = job.processed_rows || 0;
-        const total = job.total_rows || 0;
-        const successful = job.successful_rows || 0;
-        const failed = job.failed_rows || 0;
-        const stage = job.stage || 'PROCESSING';
-
-        if (stage === 'FINALIZING') {
-          this._lastProgressPct = Math.max(98, this._lastProgressPct);
-          if (progressBar) {
-            progressBar.style.width = '98%';
-            progressBar.classList.add('animate-pulse');
-          }
-          if (progressPct) progressPct.textContent = '98%';
-          if (progressText) {
-            progressText.textContent = 'Finalizing batch and committing records to database...';
-          }
-          return;
+      } else if (total > 0) {
+        const displayPct = Math.max(25, this._lastProgressPct);
+        this._lastProgressPct = displayPct;
+        if (progressBar) {
+          progressBar.style.width = `${displayPct}%`;
+          progressBar.classList.add('animate-pulse');
         }
-
-        if (stage === 'PARSING') {
-          this._lastProgressPct = Math.max(20, this._lastProgressPct);
-          if (progressBar) {
-            progressBar.style.width = '20%';
-            progressBar.classList.add('animate-pulse');
-          }
-          if (progressPct) progressPct.textContent = '20%';
-          if (progressText) {
-            progressText.textContent = 'Parsing CSV file structure and detecting delimiters...';
-          }
-          return;
+        if (progressPct) progressPct.textContent = `${displayPct}%`;
+        if (progressText) {
+          progressText.textContent = `Preparing ingestion of ${total.toLocaleString()} records...`;
         }
-
-        if (stage === 'VALIDATING') {
-          this._lastProgressPct = Math.max(25, this._lastProgressPct);
-          if (progressBar) {
-            progressBar.style.width = '25%';
-            progressBar.classList.add('animate-pulse');
-          }
-          if (progressPct) progressPct.textContent = '25%';
-          if (progressText) {
-            progressText.textContent = 'Validating columns and calculating record boundaries...';
-          }
-          return;
+      } else {
+        const displayPct = Math.max(20, this._lastProgressPct);
+        this._lastProgressPct = displayPct;
+        if (progressBar) {
+          progressBar.style.width = `${displayPct}%`;
+          progressBar.classList.add('animate-pulse');
         }
-
-        if (processed > 0 && total > 0) {
-          const ratio = Math.min(processed / total, 1.0);
-          const pct = Math.min(25 + Math.round(ratio * 70), 96);
-          const displayPct = Math.max(pct, this._lastProgressPct);
-          this._lastProgressPct = displayPct;
-
-          if (!this._ingestStartTime) {
-            this._ingestStartTime = Date.now();
-            this._ingestStartProcessed = processed;
-          }
-          let etaStr = '';
-          const elapsedSec = (Date.now() - this._ingestStartTime) / 1000;
-          const processedDelta = processed - this._ingestStartProcessed;
-          if (elapsedSec > 2 && processedDelta > 0 && total > processed) {
-            const rps = processedDelta / elapsedSec;
-            const remaining = total - processed;
-            const etaSec = Math.round(remaining / Math.max(rps, 0.1));
-            if (etaSec > 60) {
-              etaStr = ` • ETA: ~${Math.floor(etaSec / 60)}m ${etaSec % 60}s`;
-            } else if (etaSec > 0) {
-              etaStr = ` • ETA: ~${etaSec}s`;
-            }
-          }
-
-          if (progressBar) {
-            progressBar.style.width = `${displayPct}%`;
-            progressBar.classList.remove('animate-pulse');
-          }
-          if (progressPct) progressPct.textContent = `${displayPct}%`;
-          if (progressText) {
-            progressText.textContent = `Processing ${processed.toLocaleString()} / ${total.toLocaleString()} records${etaStr} (Inserted: ${successful.toLocaleString()} | Rejected: ${failed.toLocaleString()})`;
-          }
-        } else if (total > 0) {
-          const displayPct = Math.max(25, this._lastProgressPct);
-          this._lastProgressPct = displayPct;
-          if (progressBar) {
-            progressBar.style.width = `${displayPct}%`;
-            progressBar.classList.add('animate-pulse');
-          }
-          if (progressPct) progressPct.textContent = `${displayPct}%`;
-          if (progressText) {
-            progressText.textContent = `Preparing ingestion of ${total.toLocaleString()} records...`;
-          }
-        } else {
-          const displayPct = Math.max(20, this._lastProgressPct);
-          this._lastProgressPct = displayPct;
-          if (progressBar) {
-            progressBar.style.width = `${displayPct}%`;
-            progressBar.classList.add('animate-pulse');
-          }
-          if (progressPct) progressPct.textContent = `${displayPct}%`;
-          if (progressText) {
-            progressText.textContent = 'Analyzing and processing batch in background...';
-          }
-        }
-      } catch (err) {
-        this._pollInFlight = false;
-        if (this._isTerminal || this._activeJobId !== jobId) {
-          return;
-        }
-
-        this._consecutivePollErrors += 1;
-        const MAX_CONSECUTIVE_POLL_ERRORS = 5;
-
-        if (this._consecutivePollErrors < MAX_CONSECUTIVE_POLL_ERRORS) {
-          if (progressText) {
-            progressText.textContent = `Temporary network interruption. Retrying status check (${this._consecutivePollErrors}/${MAX_CONSECUTIVE_POLL_ERRORS})...`;
-          }
-        } else {
-          this._isTerminal = true;
-          if (this.pollingInterval) {
-            clearInterval(this.pollingInterval);
-            this.pollingInterval = null;
-          }
-          this.stopPollingPulse();
-          this.isUploading = false;
-          if (uploadBtn) uploadBtn.disabled = false;
-          if (progressText) {
-            progressText.textContent = `Polling error: ${err.message || 'Network connection lost.'}`;
-          }
-          window.showToast('Unable to check import progress due to network error.', 'error');
+        if (progressPct) progressPct.textContent = `${displayPct}%`;
+        if (progressText) {
+          progressText.textContent = 'Analyzing and processing batch in background...';
         }
       }
-    }, 1500);
+
+      // Schedule next poll using adaptive schedule
+      this.scheduleNextPoll(jobId, this.computeNextIntervalMs(0));
+    } catch (err) {
+      this._pollInFlight = false;
+      this._pollAbortController = null;
+      if (this._isTerminal || this._activeJobId !== jobId) {
+        return;
+      }
+
+      this._consecutivePollErrors += 1;
+      const retryAfterSec = err.retryAfter || null;
+      const nextDelayMs = this.computeNextIntervalMs(this._consecutivePollErrors, retryAfterSec);
+      const nextSec = Math.round(nextDelayMs / 1000);
+
+      // Determine human-readable diagnosis without leaking raw HTML
+      let issueDesc = 'Temporary connectivity interruption';
+      if (err.isCloudflareChallenge) {
+        issueDesc = 'Edge security challenge encountered';
+      } else if (err.status === 429) {
+        issueDesc = 'Rate limit backoff active';
+      } else if (err.status === 502 || err.status === 503) {
+        issueDesc = 'Server restarting or temporarily unavailable';
+      }
+
+      // Resilient error threshold: do NOT prematurely abort running background jobs
+      if (this._consecutivePollErrors < this.POLLING_CONFIG.maxConsecutiveErrors) {
+        if (progressText) {
+          progressText.textContent = `Progress monitoring temporarily unavailable (${issueDesc}). Ingestion continues on server. Retrying in ${nextSec}s (${this._consecutivePollErrors}/${this.POLLING_CONFIG.maxConsecutiveErrors})...`;
+        }
+        // Preserve existing progress bar and percentage intact!
+        this.scheduleNextPoll(jobId, nextDelayMs);
+      } else {
+        // Paused after repeated failures: do NOT mark the job as FAILED
+        if (progressText) {
+          progressText.textContent =
+            'Progress monitoring paused after multiple network interruptions. The import may still be processing on the server.';
+        }
+        this.stopPollingPulse();
+        if (uploadBtn) uploadBtn.disabled = false;
+        window.showToast(
+          'Progress monitoring paused due to network interruptions. Import continues on server.',
+          'info'
+        );
+      }
+    }
   },
 
   downloadSampleTemplate() {
@@ -831,9 +987,7 @@ const ImportsController = {
       progressPct.classList.add('text-rose-500');
     }
     if (progressText) {
-      progressText.textContent = job.id
-        ? `Import Job Failed [Job ID: ${job.id}] (${job.stage || 'FAILED'}).`
-        : 'Import Job Failed.';
+      progressText.textContent = 'Import Job Failed.';
     }
 
     const totalRows = job.total_rows !== undefined && job.total_rows !== null ? job.total_rows : 0;
@@ -881,6 +1035,44 @@ const ImportsController = {
     if (uploadBtn) uploadBtn.disabled = false;
     const primaryError = errors[0] || 'Import job failed.';
     window.showToast(primaryError, 'error');
+  },
+
+  renderJobCancelled(_job) {
+    this._isTerminal = true;
+    try {
+      localStorage.removeItem('sentiment_pulse_active_import_job');
+    } catch {}
+    if (this._pollTimeoutId) {
+      clearTimeout(this._pollTimeoutId);
+      this._pollTimeoutId = null;
+    }
+    if (this.pollingInterval) {
+      clearInterval(this.pollingInterval);
+      this.pollingInterval = null;
+    }
+    this.stopPollingPulse();
+    this.isUploading = false;
+
+    const progressText = document.getElementById('import-progress-status');
+    const progressBar = document.getElementById('import-progress-bar');
+    const progressPct = document.getElementById('import-progress-pct');
+    const uploadBtn = document.getElementById('import-submit-btn');
+
+    if (progressBar) {
+      progressBar.classList.remove('animate-pulse', 'bg-indigo-600', 'bg-rose-500');
+      progressBar.classList.add('bg-amber-500');
+      progressBar.style.width = '100%';
+    }
+    if (progressPct) {
+      progressPct.textContent = 'Cancelled';
+      progressPct.classList.remove('text-slate-500', 'text-rose-500');
+      progressPct.classList.add('text-amber-500');
+    }
+    if (progressText) {
+      progressText.textContent = 'Import Job Cancelled.';
+    }
+    if (uploadBtn) uploadBtn.disabled = false;
+    window.showToast('Import job was cancelled.', 'info');
   },
 };
 

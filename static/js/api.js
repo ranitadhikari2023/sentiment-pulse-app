@@ -68,8 +68,14 @@ const API = {
 
       const requestId = response.headers.get('X-Request-ID');
       const processTime = response.headers.get('X-Process-Time');
+      const cfRay = response.headers.get('cf-ray') || response.headers.get('CF-Ray');
+      const cfMitigated = response.headers.get('cf-mitigated');
+      const retryAfterHeader =
+        response.headers.get('retry-after') || response.headers.get('Retry-After');
+      const parsedRetryAfter = retryAfterHeader ? parseInt(retryAfterHeader, 10) : null;
+      const retryAfter = !isNaN(parsedRetryAfter) && parsedRetryAfter > 0 ? parsedRetryAfter : null;
 
-      // Handle raw non-JSON responses (e.g. CSV exports, HTML fallbacks)
+      // Handle raw non-JSON responses (e.g. CSV exports, binary streams)
       const contentType = response.headers.get('content-type') || '';
       if (contentType.includes('text/csv') || contentType.includes('application/octet-stream')) {
         if (!response.ok) {
@@ -79,13 +85,83 @@ const API = {
       }
 
       const isJson = contentType.includes('application/json');
-      const data = isJson ? await response.json() : await response.text();
+      let data = null;
+      let rawText = '';
+      let isCloudflareChallenge = false;
+      let isHtmlResponse = false;
+
+      if (isJson) {
+        try {
+          data = await response.json();
+        } catch {
+          // Response declared application/json but contained malformed payload
+          data = null;
+          isHtmlResponse = false;
+        }
+      } else {
+        // Read text payload safely to inspect for edge HTML challenges
+        try {
+          rawText = await response.text();
+        } catch {
+          rawText = '';
+        }
+
+        const trimmed = rawText.trim();
+        if (
+          contentType.includes('text/html') ||
+          trimmed.startsWith('<!DOCTYPE') ||
+          trimmed.startsWith('<html')
+        ) {
+          isHtmlResponse = true;
+
+          // Detect Cloudflare Managed Challenge or Bot Fight Mode
+          if (
+            cfMitigated === 'challenge' ||
+            rawText.includes('cf_chl_opt') ||
+            rawText.includes('<title>Just a moment...</title>') ||
+            rawText.includes('Checking your browser') ||
+            rawText.includes('cloudflare-static') ||
+            (rawText.includes('Cloudflare') && [403, 429, 503].includes(response.status))
+          ) {
+            isCloudflareChallenge = true;
+          }
+        } else {
+          // Plain text fallback
+          data = trimmed;
+        }
+      }
 
       if (!response.ok) {
         let errorMsg = 'An unexpected server error occurred.';
         let errorType = null;
         let jobId = null;
-        if (data && typeof data === 'object') {
+
+        if (isCloudflareChallenge) {
+          errorMsg = 'Cloudflare security challenge encountered. Edge verification required.';
+          errorType = 'cloudflare_challenge';
+          // Never assign raw HTML challenge payload to detail
+          data = null;
+        } else if (isHtmlResponse) {
+          // Provide clean, human-readable edge error instead of raw HTML
+          if (response.status === 502) {
+            errorMsg = 'Bad Gateway: The application server is temporarily unreachable (502).';
+            errorType = 'edge_bad_gateway';
+          } else if (response.status === 503) {
+            errorMsg =
+              'Service Unavailable: The server is starting or capacity is constrained (503).';
+            errorType = 'edge_service_unavailable';
+          } else if (response.status === 504) {
+            errorMsg = 'Gateway Timeout: Request exceeded server response deadline (504).';
+            errorType = 'edge_gateway_timeout';
+          } else if (response.status === 403) {
+            errorMsg = 'Access Denied: Request challenged or blocked by edge security rules (403).';
+            errorType = 'edge_access_denied';
+          } else {
+            errorMsg = `Server or edge proxy returned an HTML error page (HTTP ${response.status}).`;
+            errorType = 'edge_html_response';
+          }
+          data = null;
+        } else if (data && typeof data === 'object') {
           if (data.detail) {
             if (typeof data.detail === 'string') {
               errorMsg = data.detail;
@@ -101,6 +177,9 @@ const API = {
           if (data.job_id) jobId = data.job_id;
         } else if (typeof data === 'string' && data.trim()) {
           errorMsg = data;
+        } else if (!isJson && !data) {
+          errorMsg = `Server returned invalid or unparseable response (HTTP ${response.status}).`;
+          errorType = 'invalid_response';
         }
 
         const error = new Error(errorMsg);
@@ -110,7 +189,16 @@ const API = {
         error.errorType = errorType;
         error.jobId = jobId;
         error.detail = data;
+        error.retryAfter = retryAfter;
+        error.cfRay = cfRay || null;
+        error.isCloudflareChallenge = isCloudflareChallenge;
+        error.isHtmlResponse = isHtmlResponse;
         throw error;
+      }
+
+      // If response is OK but data is null because of malformed JSON
+      if (data === null && !isHtmlResponse) {
+        throw new Error('Received invalid JSON response from server.');
       }
 
       return data;
@@ -213,8 +301,16 @@ const API = {
     });
   },
 
-  async getImportJob(jobId) {
-    return this.request(`/feedback/import/${jobId}`);
+  async getImportJob(jobId, options = {}) {
+    return this.request(`/feedback/import/${jobId}`, {
+      method: 'GET',
+      headers: {
+        'Cache-Control': 'no-cache, no-store',
+        Pragma: 'no-cache',
+        ...(options.headers || {}),
+      },
+      ...options,
+    });
   },
 
   async exportCSV() {

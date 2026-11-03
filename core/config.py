@@ -177,6 +177,9 @@ class Settings:
 
     # Rate Limiting (in-memory per client IP)
     RATE_LIMIT_ENABLED: bool = os.getenv("RATE_LIMIT_ENABLED", "true").lower() in ("true", "1")
+    RATE_LIMIT_STATUS_POLL: int = int(os.getenv("RATE_LIMIT_STATUS_POLL", "120"))
+    RATE_LIMIT_IMPORT_UPLOAD: int = int(os.getenv("RATE_LIMIT_IMPORT_UPLOAD", "30"))
+    RATE_LIMIT_DEFAULT: int = int(os.getenv("RATE_LIMIT_DEFAULT", "120"))
 
     # Application Base URL
     APP_BASE_URL: str = os.getenv(
@@ -195,7 +198,7 @@ class Settings:
         os.getenv("MAX_IMPORT_ROWS", "1050000")
     )
     DB_INSERT_CHUNK_SIZE: int = int(
-        os.getenv("DB_INSERT_CHUNK_SIZE", os.getenv("IMPORT_CHUNK_SIZE", "2000"))
+        os.getenv("DB_INSERT_CHUNK_SIZE", os.getenv("IMPORT_CHUNK_SIZE", "5000"))
     )
     IMPORT_CHUNK_SIZE: int = DB_INSERT_CHUNK_SIZE
     MAX_CONCURRENT_IMPORT_JOBS: int = int(os.getenv("MAX_CONCURRENT_IMPORT_JOBS", "10"))

@@ -11,7 +11,7 @@ import hashlib
 import tempfile
 from typing import Optional, Any
 from datetime import datetime, timezone
-from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, BackgroundTasks, Request
+from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, BackgroundTasks, Request, Response
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import ProgrammingError, OperationalError, InternalError, SQLAlchemyError
 
@@ -76,7 +76,17 @@ def log_import_event(
         logger.info(log_msg)
 
 
-async def _upload_handler(request: Request, file: UploadFile, db: Session, background_tasks: BackgroundTasks):
+async def _upload_handler(
+    request: Request,
+    file: UploadFile,
+    db: Session,
+    background_tasks: BackgroundTasks,
+    response: Optional[Response] = None,
+):
+    if response is not None:
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
     req_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
     endpoint = request.url.path
     job_id = None
@@ -320,7 +330,12 @@ async def _upload_handler(request: Request, file: UploadFile, db: Session, backg
             _cleanup_temp_file(temp_file, temp_path)
 
 
-def _status_handler(request: Request, job_id: str, db: Session):
+def _status_handler(request: Request, job_id: str, db: Session, response: Optional[Response] = None):
+    if response is not None:
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+
     job = ImportService.get_import_job(db, job_id)
     if not job:
         raise HTTPException(
@@ -340,7 +355,18 @@ def _status_handler(request: Request, job_id: str, db: Session):
     return job
 
 
-def _resume_handler(request: Request, job_id: str, background_tasks: BackgroundTasks, db: Session):
+def _resume_handler(
+    request: Request,
+    job_id: str,
+    background_tasks: BackgroundTasks,
+    db: Session,
+    response: Optional[Response] = None,
+):
+    if response is not None:
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+
     job = ImportService.get_import_job(db, job_id)
     if not job:
         raise HTTPException(
@@ -370,28 +396,31 @@ for r in (router, api_router):
     @r.post("", response_model=ImportJobResponse, status_code=status.HTTP_202_ACCEPTED)
     async def upload_csv_endpoint(
         request: Request,
+        response: Response,
         background_tasks: BackgroundTasks,
         file: UploadFile = File(..., description="CSV file with feedback text"),
         db: Session = Depends(get_db)
     ):
         """Uploads and schedules a customer feedback CSV file for background ingestion."""
-        return await _upload_handler(request, file, db, background_tasks)
+        return await _upload_handler(request, file, db, background_tasks, response=response)
 
     @r.get("/{job_id}", response_model=ImportJobResponse)
     def get_job_status_endpoint(
         request: Request,
+        response: Response,
         job_id: str,
         db: Session = Depends(get_db)
     ):
         """Retrieves import job status and progress."""
-        return _status_handler(request, job_id, db)
+        return _status_handler(request, job_id, db, response=response)
 
     @r.post("/{job_id}/resume", response_model=ImportJobResponse, status_code=status.HTTP_202_ACCEPTED)
     def resume_job_endpoint(
         request: Request,
+        response: Response,
         job_id: str,
         background_tasks: BackgroundTasks,
         db: Session = Depends(get_db)
     ):
         """Resumes an interrupted or paused customer feedback import job from its last checkpoint."""
-        return _resume_handler(request, job_id, background_tasks, db)
+        return _resume_handler(request, job_id, background_tasks, db, response=response)

@@ -179,6 +179,7 @@ class ImportService:
         job.status = "PENDING"
         job.stage = "QUEUED"
         job.error_summary = None
+        job.failed_rows = 0
         db.commit()
         db.refresh(job)
 
@@ -748,6 +749,8 @@ class ImportService:
                 resume_skip_rows = 0
                 if job.processed_rows > 0 and staged_existing > 0:
                     resume_skip_rows = job.processed_rows
+                    job.successful_rows = staged_existing
+                    job.failed_rows = 0
                     logger.info(
                         f"Resuming ImportJob '{job.id}' checkpoint: {resume_skip_rows} rows already processed, "
                         f"{staged_existing} records in staging."
