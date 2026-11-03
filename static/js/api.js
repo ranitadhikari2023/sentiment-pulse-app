@@ -83,12 +83,22 @@ const API = {
 
       if (!response.ok) {
         let errorMsg = 'An unexpected server error occurred.';
+        let errorType = null;
+        let jobId = null;
         if (data && typeof data === 'object') {
           if (data.detail) {
-            errorMsg = typeof data.detail === 'string' ? data.detail : JSON.stringify(data.detail);
+            if (typeof data.detail === 'string') {
+              errorMsg = data.detail;
+            } else if (typeof data.detail === 'object') {
+              errorMsg = data.detail.detail || data.detail.message || JSON.stringify(data.detail);
+              errorType = data.detail.error_type || data.detail.type || null;
+              jobId = data.detail.job_id || null;
+            }
           } else if (data.message) {
             errorMsg = data.message;
           }
+          if (data.error_type) errorType = data.error_type;
+          if (data.job_id) jobId = data.job_id;
         } else if (typeof data === 'string' && data.trim()) {
           errorMsg = data;
         }
@@ -97,6 +107,9 @@ const API = {
         error.status = response.status;
         error.requestId = requestId;
         error.processTime = processTime;
+        error.errorType = errorType;
+        error.jobId = jobId;
+        error.detail = data;
         throw error;
       }
 

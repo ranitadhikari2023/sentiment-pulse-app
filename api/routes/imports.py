@@ -13,6 +13,7 @@ from typing import Optional, Any
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, BackgroundTasks, Request
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import ProgrammingError, OperationalError, InternalError, SQLAlchemyError
 
 from db.session import get_db
 from db.models import ImportJob
@@ -49,16 +50,49 @@ def _cleanup_temp_file(temp_file: Optional[Any], temp_path: Optional[str]) -> No
             logger.error(f"Failed to unlink temporary file {temp_path}: {unlink_err}")
 
 
+def log_import_event(
+    request_id: str,
+    endpoint: str,
+    status_code: int,
+    job_id: Optional[str] = None,
+    file_size: Optional[int] = None,
+    stage: Optional[str] = None,
+    exc: Optional[Exception] = None,
+) -> None:
+    """
+    Structured request-level logger using correlation ID.
+    Never logs CSV contents, secrets, database credentials, or customer PII.
+    """
+    exc_type = type(exc).__name__ if exc else None
+    log_msg = (
+        f"Import Request [{request_id}] | Endpoint: {endpoint} | Status: {status_code} | "
+        f"JobID: {job_id or 'none'} | FileSize: {file_size if file_size is not None else 'unknown'} | "
+        f"Stage: {stage or 'unknown'}"
+    )
+    if exc:
+        log_msg += f" | ExcType: {exc_type}: {exc}"
+        logger.error(log_msg, exc_info=True)
+    else:
+        logger.info(log_msg)
+
+
 async def _upload_handler(request: Request, file: UploadFile, db: Session, background_tasks: BackgroundTasks):
+    req_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
+    endpoint = request.url.path
+    job_id = None
+    stage = "RECEIVED"
+    total_bytes = 0
     temp_file = None
     temp_path = None
     ownership_transferred = False
 
     try:
         # Resolve trusted tenant identity
+        stage = "TENANT_RESOLVE"
         user_id = resolve_trusted_tenant_identity(request)
 
         # Enforce concurrent running imports limit (globally and per tenant)
+        stage = "CONCURRENCY_CHECK"
         max_concurrent = settings.MAX_CONCURRENT_IMPORT_JOBS
         max_per_tenant = settings.MAX_CONCURRENT_PER_TENANT
 
@@ -81,6 +115,7 @@ async def _upload_handler(request: Request, file: UploadFile, db: Session, backg
             )
 
         # Verify file extension
+        stage = "EXTENSION_CHECK"
         if not file.filename or not file.filename.lower().endswith(".csv"):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -95,6 +130,7 @@ async def _upload_handler(request: Request, file: UploadFile, db: Session, backg
             )
 
         # Read content in bounded streaming chunks (64 KB) into temporary/durable upload storage while computing SHA-256
+        stage = "STREAMING_UPLOAD"
         CHUNK_SIZE = 64 * 1024
         total_bytes = 0
         os.makedirs(settings.UPLOAD_DIR, exist_ok=True)
@@ -142,8 +178,10 @@ async def _upload_handler(request: Request, file: UploadFile, db: Session, backg
         file_hash = hasher.hexdigest()
 
         # Validate CSV header structure quickly before scheduling background processing
+        stage = "VALIDATING_HEADER"
         _, header_error = ImportService.validate_csv_header(temp_path)
         if header_error:
+            stage = "RECORDING_HEADER_ERROR"
             job = ImportService.create_import_job(
                 db, file.filename, user_id=user_id, job_id=job_id, file_path=temp_path, file_hash=file_hash
             )
@@ -158,22 +196,120 @@ async def _upload_handler(request: Request, file: UploadFile, db: Session, backg
             db.refresh(job)
             _cleanup_temp_file(None, temp_path)
             temp_path = None
+            log_import_event(
+                request_id=req_id,
+                endpoint=endpoint,
+                status_code=status.HTTP_202_ACCEPTED,
+                job_id=job.id,
+                file_size=total_bytes,
+                stage="REJECTED_HEADER",
+            )
             return job
 
         # Create tracking job in PENDING state with durable file path and SHA-256 fingerprint
+        stage = "CREATING_JOB"
         job = ImportService.create_import_job(
             db, file.filename, user_id=user_id, job_id=job_id, file_path=temp_path, file_hash=file_hash
         )
 
         # Transfer ownership of durable file to background worker
+        stage = "SCHEDULING_WORKER"
         background_tasks.add_task(
             ImportService.process_csv_file_background,
             job_id=job.id,
             file_path=temp_path
         )
         ownership_transferred = True
+
+        log_import_event(
+            request_id=req_id,
+            endpoint=endpoint,
+            status_code=status.HTTP_202_ACCEPTED,
+            job_id=job.id,
+            file_size=total_bytes,
+            stage=job.stage,
+        )
         return job
 
+    except HTTPException as he:
+        log_import_event(
+            request_id=req_id,
+            endpoint=endpoint,
+            status_code=he.status_code,
+            job_id=job_id,
+            file_size=total_bytes or getattr(file, "size", None),
+            stage=stage,
+            exc=he,
+        )
+        raise he
+    except (ProgrammingError, InternalError) as db_schema_err:
+        log_import_event(
+            request_id=req_id,
+            endpoint=endpoint,
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            job_id=job_id,
+            file_size=total_bytes,
+            stage=stage,
+            exc=db_schema_err,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={
+                "detail": "Database schema error: required column is missing. Please ensure database migrations are up to date.",
+                "error_type": "database_schema_error",
+                "request_id": req_id,
+                "job_id": job_id,
+            }
+        )
+    except OperationalError as db_conn_err:
+        log_import_event(
+            request_id=req_id,
+            endpoint=endpoint,
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            job_id=job_id,
+            file_size=total_bytes,
+            stage=stage,
+            exc=db_conn_err,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "detail": "Database connection failure: unable to connect to database. Please try again shortly.",
+                "error_type": "database_connection_error",
+                "request_id": req_id,
+                "job_id": job_id,
+            }
+        )
+    except (OSError, IOError) as io_err:
+        log_import_event(
+            request_id=req_id,
+            endpoint=endpoint,
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            job_id=job_id,
+            file_size=total_bytes,
+            stage=stage,
+            exc=io_err,
+        )
+        raise io_err
+    except Exception as exc:
+        log_import_event(
+            request_id=req_id,
+            endpoint=endpoint,
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            job_id=job_id,
+            file_size=total_bytes,
+            stage=stage,
+            exc=exc,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={
+                "detail": "An internal server error occurred while processing the import.",
+                "error_type": "server_processing_error",
+                "request_id": req_id,
+                "job_id": job_id,
+            }
+        )
     finally:
         try:
             await file.close()

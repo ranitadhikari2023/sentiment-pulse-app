@@ -52,5 +52,5 @@ jobs:
           DATABASE_URL: postgresql+psycopg://sentiment_user:sentiment_password@localhost:5432/sentiment_pulse_db
           TEST_POSTGRES: "1"
         run: |
-          pytest tests/test_postgres_integration.py -v
+          pytest tests/test_postgres_integration.py tests/test_production_incident_verification.py -v
 

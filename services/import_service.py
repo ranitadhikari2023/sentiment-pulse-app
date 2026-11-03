@@ -126,6 +126,7 @@ class ImportService:
         file_path: Optional[str] = None,
         file_hash: Optional[str] = None,
     ) -> ImportJob:
+        now_utc = datetime.now(timezone.utc)
         job = ImportJob(
             id=job_id or str(uuid.uuid4()),
             user_id=user_id,
@@ -138,7 +139,8 @@ class ImportService:
             failed_rows=0,
             status="PENDING",
             stage="QUEUED",
-            created_at=datetime.now(timezone.utc)
+            created_at=now_utc,
+            updated_at=now_utc,
         )
         db.add(job)
         db.commit()
@@ -1115,6 +1117,7 @@ class ImportService:
 
         job.processed_rows += len(chunk)
         job.last_checkpoint_row = job.processed_rows
+        job.updated_at = datetime.now(timezone.utc)
 
     @staticmethod
     def generate_csv_export(db: Session, user_id: Optional[int] = None) -> str:

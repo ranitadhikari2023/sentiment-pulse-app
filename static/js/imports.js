@@ -263,6 +263,122 @@ const ImportsController = {
     if (uploadBtn) uploadBtn.disabled = true;
   },
 
+  categorizeError(err) {
+    const status = err.status || 0;
+    const msg = (err.message || '').toLowerCase();
+    const detail = (typeof err.detail === 'string' ? err.detail : JSON.stringify(err.detail || '')).toLowerCase();
+    const errorType = err.errorType || '';
+
+    // 1. File size limit
+    if (status === 413 || msg.includes('maximum allowed size') || msg.includes('100 mb')) {
+      return {
+        title: 'File Too Large',
+        message: 'The uploaded file exceeds the 100 MB maximum size limit.',
+        statusText: '413 Payload Too Large',
+      };
+    }
+
+    // 2. Unsupported encoding
+    if (msg.includes('encoding') || detail.includes('encoding')) {
+      return {
+        title: 'Unsupported CSV Encoding',
+        message: 'Unsupported character encoding. Please save your CSV as standard UTF-8 or Latin-1.',
+        statusText: status ? `${status} Bad Request` : 'Encoding Error',
+      };
+    }
+
+    // 3. Missing required text column
+    if (
+      msg.includes('must contain a \'text\'') ||
+      msg.includes('missing text column') ||
+      detail.includes('must contain a \'text\'')
+    ) {
+      return {
+        title: 'Missing Required Text Column',
+        message: 'CSV header must include a required feedback text column (e.g. "text", "review", or "feedback").',
+        statusText: status ? `${status} Bad Request` : 'Header Validation Error',
+      };
+    }
+
+    // 4. Empty CSV
+    if (msg.includes('empty') || detail.includes('empty')) {
+      return {
+        title: 'Empty CSV File',
+        message: 'The uploaded CSV file is empty or contains no data records.',
+        statusText: status ? `${status} Bad Request` : 'Validation Error',
+      };
+    }
+
+    // 5. Database Schema Error
+    if (
+      errorType === 'database_schema_error' ||
+      msg.includes('database schema') ||
+      (msg.includes('column') && msg.includes('does not exist')) ||
+      detail.includes('database schema') ||
+      detail.includes('undefinedcolumn')
+    ) {
+      return {
+        title: 'Database Schema Error',
+        message: 'Database schema mismatch: required table or column does not exist. Database migrations must be applied.',
+        statusText: `${status || 500} Database Schema Error`,
+      };
+    }
+
+    // 6. Database Connection Failure
+    if (
+      errorType === 'database_connection_error' ||
+      status === 503 ||
+      msg.includes('database connection') ||
+      detail.includes('database connection') ||
+      msg.includes('operationalerror')
+    ) {
+      return {
+        title: 'Database Connection Failure',
+        message: 'Unable to connect to the database. The database service may be restarting or unavailable.',
+        statusText: `${status || 503} Service Unavailable`,
+      };
+    }
+
+    // 7. Request Timeout
+    if (
+      msg.includes('timeout') ||
+      msg.includes('timed out') ||
+      err.name === 'AbortError' ||
+      err.name === 'TimeoutError'
+    ) {
+      return {
+        title: 'Request Timeout',
+        message: 'Upload request timed out before the server completed receipt. Please retry.',
+        statusText: '408 Request Timeout',
+      };
+    }
+
+    // 8. Rate Limiting / Concurrent Limits
+    if (status === 429 || msg.includes('concurrent import limit')) {
+      return {
+        title: 'Concurrent Import Limit Reached',
+        message: 'Too many batch imports are currently running. Please wait for active jobs to complete.',
+        statusText: '429 Too Many Requests',
+      };
+    }
+
+    // 9. Import Job Creation Failure
+    if (errorType === 'import_job_creation_failed' || msg.includes('failed to initialize import job')) {
+      return {
+        title: 'Import Job Creation Failed',
+        message: 'Server failed to initialize batch import job record.',
+        statusText: `${status || 500} Internal Server Error`,
+      };
+    }
+
+    // 10. General Server-Side Processing Failure
+    return {
+      title: 'Server-Side Processing Error',
+      message: err.message || 'An unexpected internal error occurred on the server while processing the upload.',
+      statusText: `${status || 500} Internal Server Error`,
+    };
+  },
+
   async startUpload() {
     if (!this.selectedFile || this.isUploading) return;
 
@@ -322,7 +438,7 @@ const ImportsController = {
       } else {
         // PENDING or PROCESSING: transition UI to accepted state and poll until terminal state
         if (progressText) {
-          progressText.textContent = 'Upload accepted. Validating and analyzing batch...';
+          progressText.textContent = `Upload accepted [Job ID: ${job.id}]. Validating and analyzing batch...`;
         }
         if (progressBar) progressBar.style.width = '25%';
         if (progressPct) progressPct.textContent = '25%';
@@ -335,23 +451,31 @@ const ImportsController = {
       this._isTerminal = true;
       this.stopPollingPulse();
 
-      const errorMessage =
-        err.status === 413
-          ? err.message || 'File exceeds maximum allowed size (100 MB).'
-          : err.message || 'CSV upload failed.';
+      const cat = this.categorizeError(err);
+      let errorDisplay = `Upload error [${cat.statusText}]: ${cat.message}`;
+      if (err.jobId) {
+        errorDisplay += ` (Job ID: ${err.jobId})`;
+      } else if (err.requestId) {
+        errorDisplay += ` (Request ID: ${err.requestId.slice(0, 8)})`;
+      }
 
-      if (progressText) progressText.textContent = `Upload error: ${errorMessage}`;
+      if (progressText) progressText.textContent = errorDisplay;
       if (progressBar) {
         progressBar.style.width = '0%';
-        progressBar.classList.remove('animate-pulse');
+        progressBar.classList.remove('animate-pulse', 'bg-indigo-600');
+        progressBar.classList.add('bg-rose-500');
       }
-      if (progressPct) progressPct.textContent = '0%';
+      if (progressPct) {
+        progressPct.textContent = '0%';
+        progressPct.classList.remove('text-slate-500');
+        progressPct.classList.add('text-rose-500');
+      }
 
       if (statusCard && window.AnimationManager && !window.AnimationManager.isReducedMotion()) {
         window.AnimationManager.play('errorShake', statusCard, {}, 'import-export');
       }
 
-      window.showToast(errorMessage, 'error');
+      window.showToast(`${cat.title}: ${cat.message}`, 'error');
       if (uploadBtn) uploadBtn.disabled = false;
     }
   },
@@ -707,7 +831,9 @@ const ImportsController = {
       progressPct.classList.add('text-rose-500');
     }
     if (progressText) {
-      progressText.textContent = 'Import Job Failed.';
+      progressText.textContent = job.id
+        ? `Import Job Failed [Job ID: ${job.id}] (${job.stage || 'FAILED'}).`
+        : 'Import Job Failed.';
     }
 
     const totalRows = job.total_rows !== undefined && job.total_rows !== null ? job.total_rows : 0;

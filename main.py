@@ -84,6 +84,7 @@ async def lifespan(app: FastAPI):
                     j.status = "PENDING"
                     j.stage = "QUEUED"
                     j.last_checkpoint_row = j.processed_rows
+                    j.updated_at = datetime.now(timezone.utc)
                     logger.info(
                         f"Preserved recoverable import job '{j.id}' at checkpoint row {j.processed_rows} "
                         f"with intact source file across server restart."
@@ -95,6 +96,7 @@ async def lifespan(app: FastAPI):
                         "Import job was interrupted and source CSV file is missing or corrupted."
                     ])
                     j.completed_at = datetime.now(timezone.utc)
+                    j.updated_at = datetime.now(timezone.utc)
                     db.execute(delete(FeedbackStaging).where(FeedbackStaging.import_job_id == j.id))
                     logger.warning(
                         f"Marked unrecoverable import job '{j.id}' as FAILED and purged staging records."
@@ -103,7 +105,8 @@ async def lifespan(app: FastAPI):
                 db.commit()
                 logger.info(f"Reconciled {len(stale_jobs)} interrupted import jobs on startup.")
     except Exception as recovery_err:
-        logger.warning(f"Startup job recovery check skipped: {recovery_err}")
+        logger.critical(f"Startup job recovery check failed: {recovery_err}", exc_info=True)
+        raise RuntimeError(f"Startup recovery failed due to database or schema error: {recovery_err}") from recovery_err
 
     logger.info("Verifying SentimentAnalyzer inference engine readiness...")
     if not sentiment_service.is_ready():

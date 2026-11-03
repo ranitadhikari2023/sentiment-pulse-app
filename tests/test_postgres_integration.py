@@ -144,6 +144,32 @@ def test_postgres_dialect_staging_delete_compilation():
     assert "WHERE feedback_staging.import_job_id =" in compiled
 
 
+def test_postgres_dialect_import_jobs_query_with_updated_at_compilation():
+    """Verifies that the startup recovery query compiles with import_jobs.updated_at on PostgreSQL."""
+    pg_dialect = postgresql.dialect()
+    stmt = select(ImportJob).where(ImportJob.status.in_(["PENDING", "PROCESSING"]))
+    compiled = str(stmt.compile(dialect=pg_dialect))
+    assert "import_jobs.updated_at" in compiled
+    assert "import_jobs.stage" in compiled
+    assert "import_jobs.last_checkpoint_row" in compiled
+
+
+def test_postgres_dialect_cas_finalization_with_updated_at_compilation():
+    """Verifies that the finalization lease CAS query compiles with updated_at on PostgreSQL."""
+    pg_dialect = postgresql.dialect()
+    stale_cutoff = datetime.now(timezone.utc)
+    cas_stmt = (
+        select(ImportJob)
+        .where(
+            ImportJob.id == "test-job-uuid",
+            ImportJob.stage == "FINALIZING",
+            (ImportJob.updated_at < stale_cutoff) | (ImportJob.updated_at.is_(None))
+        )
+    )
+    compiled = str(cas_stmt.compile(dialect=pg_dialect))
+    assert "import_jobs.updated_at <" in compiled
+
+
 # ==============================================================================
 # SECTION B: Live PostgreSQL Integration (Runs in CI or when PG is live)
 # ==============================================================================
@@ -174,6 +200,7 @@ def test_pg_bulk_insert_and_atomic_transfer(pg_session):
     3. Verify feedback count and staging purge.
     """
     job_id = str(uuid.uuid4())
+    now = datetime.now(timezone.utc)
     job = ImportJob(
         id=job_id,
         user_id=1,
@@ -184,6 +211,8 @@ def test_pg_bulk_insert_and_atomic_transfer(pg_session):
         failed_rows=0,
         status="PROCESSING",
         stage="INSERTING",
+        created_at=now,
+        updated_at=now,
     )
     pg_session.add(job)
     pg_session.commit()

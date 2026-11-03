@@ -19,10 +19,13 @@ Thumbs.db
 
 # SQLite Databases
 *.db
+*.db-shm
+*.db-wal
 *.sqlite3
 
-# Training data
+# Training data and uploads
 data/*.csv
+data/uploads/
 
 # Node dependencies and artifacts
 node_modules/

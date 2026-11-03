@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import text
 
 from db.session import get_db
-from db.models import Feedback
+from db.models import Feedback, ImportJob, FeedbackStaging
 from services.sentiment_service import sentiment_service
 from schemas.health import HealthResponse, ReadinessResponse
 from core.config import settings
@@ -74,8 +74,10 @@ def readiness_check(db: Session = Depends(get_db)):
     try:
         db.execute(text("SELECT 1"))
         db.query(Feedback).first()
+        db.query(ImportJob).first()
+        db.query(FeedbackStaging).first()
     except Exception as e:
-        logger.error(f"Readiness probe DB connection or schema query failed: {e}")
+        logger.error(f"Readiness probe DB connection or schema query failed: {e}", exc_info=True)
         db_status = f"unhealthy: {str(e)}"
 
     # 2. Check Model availability
